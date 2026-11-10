@@ -30,7 +30,25 @@ public partial class App : System.Windows.Application
         base.OnStartup(e);
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
-        bool usePostgres = IsPostgresPortOpen("localhost", 5432);
+        try
+        {
+            await InitializeAndShowMainWindowAsync();
+        }
+        catch (Exception ex)
+        {
+            string logPath = Path.Combine(AppContext.BaseDirectory, "startup_error.log");
+            File.WriteAllText(logPath, ex.ToString());
+            Console.Error.WriteLine(ex.ToString());
+            Shutdown(1);
+        }
+    }
+
+    private async Task InitializeAndShowMainWindowAsync()
+    {
+        bool usePostgres = string.Equals(
+            Environment.GetEnvironmentVariable("VIBEMOVIES_USE_POSTGRES"),
+            "true",
+            StringComparison.OrdinalIgnoreCase) && IsPostgresPortOpen("localhost", 5432);
         var optionsBuilder = new DbContextOptionsBuilder<VibeMoviesDbContext>();
 
         if (usePostgres)
@@ -101,8 +119,11 @@ public partial class App : System.Windows.Application
 
         MainWindow = mainWindow;
         mainWindow.Closed += (_, _) => Shutdown();
+        mainWindow.Topmost = true;
         mainWindow.Show();
         mainWindow.Activate();
+        mainWindow.Focus();
+        mainWindow.Topmost = false;
     }
 
     private static bool IsPostgresPortOpen(string host, int port)
