@@ -28,6 +28,7 @@ public partial class App : System.Windows.Application
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
         bool usePostgres = IsPostgresPortOpen("localhost", 5432);
         var optionsBuilder = new DbContextOptionsBuilder<VibeMoviesDbContext>();
@@ -99,7 +100,9 @@ public partial class App : System.Windows.Application
             ActiveDatabaseProvider);
 
         MainWindow = mainWindow;
+        mainWindow.Closed += (_, _) => Shutdown();
         mainWindow.Show();
+        mainWindow.Activate();
     }
 
     private static bool IsPostgresPortOpen(string host, int port)
