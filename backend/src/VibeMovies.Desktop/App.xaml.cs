@@ -45,41 +45,13 @@ public partial class App : System.Windows.Application
 
     private async Task InitializeAndShowMainWindowAsync()
     {
-        bool usePostgres = string.Equals(
-            Environment.GetEnvironmentVariable("VIBEMOVIES_USE_POSTGRES"),
-            "true",
-            StringComparison.OrdinalIgnoreCase) && IsPostgresPortOpen("localhost", 5432);
+        string dbPath = Path.Combine(AppContext.BaseDirectory, "vibemovies_desktop.db");
         var optionsBuilder = new DbContextOptionsBuilder<VibeMoviesDbContext>();
-
-        if (usePostgres)
-        {
-            const string postgresConn = "Host=localhost;Port=5432;Database=vibemovies_db;Username=vibemovies;Password=vibemovies_secret";
-            optionsBuilder.UseNpgsql(postgresConn);
-            ActiveDatabaseProvider = "PostgreSQL (localhost:5432)";
-        }
-        else
-        {
-            string dbPath = Path.Combine(AppContext.BaseDirectory, "vibemovies_desktop.db");
-            optionsBuilder.UseSqlite($"Data Source={dbPath}");
-            ActiveDatabaseProvider = "SQLite Local (vibemovies_desktop.db)";
-        }
+        optionsBuilder.UseSqlite($"Data Source={dbPath}");
+        ActiveDatabaseProvider = "SQLite Local (vibemovies_desktop.db)";
 
         DbContext = new VibeMoviesDbContext(optionsBuilder.Options);
-
-        try
-        {
-            await DbContext.Database.EnsureCreatedAsync();
-        }
-        catch
-        {
-            // Fallback para SQLite local caso o servidor na porta 5432 recuse autenticação
-            string dbPath = Path.Combine(AppContext.BaseDirectory, "vibemovies_desktop.db");
-            var fallbackBuilder = new DbContextOptionsBuilder<VibeMoviesDbContext>();
-            fallbackBuilder.UseSqlite($"Data Source={dbPath}");
-            DbContext = new VibeMoviesDbContext(fallbackBuilder.Options);
-            ActiveDatabaseProvider = "SQLite Local (vibemovies_desktop.db)";
-            await DbContext.Database.EnsureCreatedAsync();
-        }
+        await DbContext.Database.EnsureCreatedAsync();
 
         var userRepo = new UserRepository(DbContext);
         var watchlistRepo = new WatchlistRepository(DbContext);
