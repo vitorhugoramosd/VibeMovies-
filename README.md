@@ -28,7 +28,19 @@ Aplicação web completa para amantes de cinema escolherem filmes com base no **
 
 ## 🚀 Como Executar o Projeto
 
-### 1. Banco de Dados (PostgreSQL via Docker ou Local Zero-Config)
+### 💻 Opção 1: Aplicativo Desktop Nativo para Windows (WPF — Sem Navegador!)
+O projeto conta com uma aplicação Desktop nativa em **.NET WPF (`VibeMovies.Desktop`)** que consome diretamente as camadas de Clean Architecture (`Domain`, `Application` e `Infrastructure`), sem necessidade de abrir navegador ou subir servidor web separado:
+
+* Basta dar dois cliques em **`Executar-VibeMovies-Desktop.bat`** na raiz do projeto, ou executar:
+```bash
+dotnet run --project backend/src/VibeMovies.Desktop/VibeMovies.Desktop.csproj
+```
+
+---
+
+### 🌐 Opção 2: Aplicação Web (API + React SPA)
+
+#### 1. Banco de Dados (PostgreSQL via Docker ou Local Zero-Config)
 Para subir o PostgreSQL via Docker:
 ```bash
 docker-compose up -d

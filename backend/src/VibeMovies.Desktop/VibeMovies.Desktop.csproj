@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>VibeMovies.Desktop</AssemblyName>
+    <RootNamespace>VibeMovies.Desktop</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\VibeMovies.Domain\VibeMovies.Domain.csproj" />
+    <ProjectReference Include="..\VibeMovies.Application\VibeMovies.Application.csproj" />
+    <ProjectReference Include="..\VibeMovies.Infrastructure\VibeMovies.Infrastructure.csproj" />
+  </ItemGroup>
+
+</Project>
