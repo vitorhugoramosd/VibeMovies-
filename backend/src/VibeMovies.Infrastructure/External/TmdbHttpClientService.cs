@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
@@ -13,6 +14,10 @@ namespace VibeMovies.Infrastructure.External;
 
 public class TmdbHttpClientService : ITmdbService
 {
+    private const int MaxParallelProviderRequests = 4;
+    private const int ResultsPerPage = 12;
+    private static readonly TimeSpan ProviderCacheTtl = TimeSpan.FromHours(12);
+
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IConfiguration _configuration;
     private readonly VibeMoviesDbContext _db;
@@ -29,6 +34,8 @@ public class TmdbHttpClientService : ITmdbService
         _db = db;
         _logger = logger;
     }
+
+    public bool HasApiKey(string? runtimeApiKey = null) => !string.IsNullOrWhiteSpace(ResolveApiKey(runtimeApiKey));
 
     public async Task<DiscoverResultDto> DiscoverByVibeAsync(
         VibeDiscoverQuery query,
@@ -47,6 +54,8 @@ public class TmdbHttpClientService : ITmdbService
             .ToList();
 
         var genreIds = query.GenreIds.Distinct().ToList();
+        var providerNames = ProviderCatalog.ParseList(query.WatchProviderFilter);
+        var providerIds = ProviderCatalog.GetTmdbIds(providerNames);
 
         string? releaseGte = selectedVibes.FirstOrDefault(v => !string.IsNullOrEmpty(v.ReleaseDateGte))?.ReleaseDateGte;
         string? releaseLte = selectedVibes.FirstOrDefault(v => !string.IsNullOrEmpty(v.ReleaseDateLte))?.ReleaseDateLte;
@@ -65,21 +74,29 @@ public class TmdbHttpClientService : ITmdbService
                 ? selectedVibes.Where(v => v.MinVoteAverage.HasValue).Min(v => v.MinVoteAverage)
                 : null);
 
+        var region = NormalizeRegion(query.Region);
         var tmdbParams = new Dictionary<string, string>
         {
             ["language"] = "pt-BR",
-            ["watch_region"] = string.IsNullOrWhiteSpace(query.Region) ? "BR" : query.Region.ToUpperInvariant(),
+            ["watch_region"] = region,
             ["sort_by"] = string.IsNullOrWhiteSpace(query.SortBy) ? "popularity.desc" : query.SortBy,
             ["include_adult"] = "false",
             ["vote_count.gte"] = "150",
-            ["page"] = Math.Max(1, query.Page).ToString()
+            ["page"] = Math.Max(1, query.Page).ToString(CultureInfo.InvariantCulture)
         };
 
         if (genreIds.Count > 0)
             tmdbParams["with_genres"] = string.Join(",", genreIds);
 
         if (keywordIds.Count > 0)
-            tmdbParams["with_keywords"] = string.Join("|", keywordIds); // OR operator across Vibe keywords
+            tmdbParams["with_keywords"] = string.Join("|", keywordIds); // OR entre as keywords das vibes
+
+        if (providerIds.Count > 0)
+        {
+            // Filtra NA ORIGEM (antes da paginação do TMDB) — "|" = OR entre provedores
+            tmdbParams["with_watch_providers"] = string.Join("|", providerIds);
+            tmdbParams["watch_monetization_types"] = "flatrate";
+        }
 
         if (!string.IsNullOrEmpty(releaseGte))
             tmdbParams["primary_release_date.gte"] = releaseGte;
@@ -88,10 +105,10 @@ public class TmdbHttpClientService : ITmdbService
             tmdbParams["primary_release_date.lte"] = releaseLte;
 
         if (maxRuntime.HasValue && maxRuntime.Value > 0)
-            tmdbParams["with_runtime.lte"] = maxRuntime.Value.ToString();
+            tmdbParams["with_runtime.lte"] = maxRuntime.Value.ToString(CultureInfo.InvariantCulture);
 
         if (minVoteAverage.HasValue && minVoteAverage.Value > 0)
-            tmdbParams["vote_average.gte"] = minVoteAverage.Value.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture);
+            tmdbParams["vote_average.gte"] = minVoteAverage.Value.ToString("0.0", CultureInfo.InvariantCulture);
 
         var formulaParts = new List<string>();
         if (selectedVibes.Count > 0)
@@ -102,8 +119,8 @@ public class TmdbHttpClientService : ITmdbService
             formulaParts.Add($"Duração <= {maxRuntime.Value} min");
         if (!string.IsNullOrEmpty(releaseGte))
             formulaParts.Add($"Período [{releaseGte} a {releaseLte ?? "hoje"}]");
-        if (!string.IsNullOrWhiteSpace(query.WatchProviderFilter))
-            formulaParts.Add($"Streaming [{query.WatchProviderFilter}]");
+        if (providerNames.Count > 0)
+            formulaParts.Add($"Streaming [{string.Join(" ou ", providerNames.Select(ProviderCatalog.Canonicalize))}]");
 
         var formulaSummary = formulaParts.Count > 0
             ? string.Join(" • ", formulaParts)
@@ -112,7 +129,7 @@ public class TmdbHttpClientService : ITmdbService
         var apiKey = ResolveApiKey(runtimeApiKey);
         if (!string.IsNullOrWhiteSpace(apiKey) && string.IsNullOrWhiteSpace(query.SearchText))
         {
-            var liveResult = await TryDiscoverFromTmdbApiAsync(tmdbParams, selectedVibes, query, apiKey, formulaSummary, ct);
+            var liveResult = await TryDiscoverFromTmdbApiAsync(tmdbParams, selectedVibes, keywordIds.Count > 0, providerNames, region, apiKey, formulaSummary, ct);
             if (liveResult is not null && liveResult.Movies.Count > 0)
             {
                 return liveResult;
@@ -120,7 +137,7 @@ public class TmdbHttpClientService : ITmdbService
         }
         else if (!string.IsNullOrWhiteSpace(apiKey) && !string.IsNullOrWhiteSpace(query.SearchText))
         {
-            var searched = await SearchMoviesAsync(query.SearchText, query.Region, apiKey, ct);
+            var searched = await SearchMoviesAsync(query.SearchText, region, apiKey, ct);
             if (searched.Count > 0)
             {
                 return new DiscoverResultDto
@@ -131,7 +148,7 @@ public class TmdbHttpClientService : ITmdbService
                     UsingLiveTmdbApi = true,
                     AppliedFormulaSummary = $"Busca Textual TMDB: \"{query.SearchText}\" • {formulaSummary}",
                     AppliedTmdbQueryParameters = tmdbParams,
-                    Movies = FilterMovieListLocally(searched, query, selectedVibes, maxRuntime, releaseGte, releaseLte, minVoteAverage)
+                    Movies = FilterMovieListLocally(searched, query, selectedVibes, providerNames, maxRuntime, releaseGte, releaseLte, minVoteAverage)
                 };
             }
         }
@@ -140,6 +157,7 @@ public class TmdbHttpClientService : ITmdbService
             CuratedMovieDataset.Movies,
             query,
             selectedVibes,
+            providerNames,
             maxRuntime,
             releaseGte,
             releaseLte,
@@ -164,8 +182,9 @@ public class TmdbHttpClientService : ITmdbService
         CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(queryText))
-            return CuratedMovieDataset.Movies;
+            return CuratedMovieDataset.CloneAll();
 
+        region = NormalizeRegion(region);
         var apiKey = ResolveApiKey(runtimeApiKey);
         if (!string.IsNullOrWhiteSpace(apiKey))
         {
@@ -178,24 +197,25 @@ public class TmdbHttpClientService : ITmdbService
                 if (response.IsSuccessStatusCode)
                 {
                     using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
-                    var movies = await ParseTmdbResultsArrayAsync(doc.RootElement, region, apiKey, new List<VibeDefinition>(), ct);
+                    var movies = await ParseTmdbResultsArrayAsync(doc.RootElement, region, apiKey, new List<VibeDefinition>(), false, ct);
                     if (movies.Count > 0) return movies;
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
                 _logger.LogWarning(ex, "Falha ao consultar /search/movie na API do TMDB. Usando catálogo local.");
             }
         }
 
-        var q = queryText.Trim().ToLowerInvariant();
+        var q = TextNormalizer.Normalize(queryText);
         return CuratedMovieDataset.Movies
             .Where(m =>
-                m.Title.ToLowerInvariant().Contains(q) ||
-                m.OriginalTitle.ToLowerInvariant().Contains(q) ||
-                m.Overview.ToLowerInvariant().Contains(q) ||
-                (m.Director?.ToLowerInvariant().Contains(q) ?? false) ||
-                m.Keywords.Any(k => k.ToLowerInvariant().Contains(q)))
+                TextNormalizer.Normalize(m.Title).Contains(q) ||
+                TextNormalizer.Normalize(m.OriginalTitle).Contains(q) ||
+                TextNormalizer.Normalize(m.Overview).Contains(q) ||
+                TextNormalizer.Normalize(m.Director).Contains(q) ||
+                m.Keywords.Any(k => TextNormalizer.Normalize(k).Contains(q)))
+            .Select(m => m.Clone())
             .ToList();
     }
 
@@ -205,7 +225,8 @@ public class TmdbHttpClientService : ITmdbService
         string? runtimeApiKey = null,
         CancellationToken ct = default)
     {
-        var curated = CuratedMovieDataset.Movies.FirstOrDefault(m => m.TmdbId == tmdbId);
+        region = NormalizeRegion(region);
+        var curated = CuratedMovieDataset.FindClone(tmdbId);
         var apiKey = ResolveApiKey(runtimeApiKey);
         if (string.IsNullOrWhiteSpace(apiKey))
         {
@@ -215,16 +236,41 @@ public class TmdbHttpClientService : ITmdbService
         try
         {
             var client = CreateAuthorizedClient(apiKey);
-            using var response = await client.GetAsync($"movie/{tmdbId}?language=pt-BR&append_to_response=credits,keywords,watch/providers", ct);
+            var url = $"movie/{tmdbId}?language=pt-BR&append_to_response=credits,keywords,videos,watch/providers&include_video_language=pt,en,null";
+            using var response = await client.GetAsync(url, ct);
             if (!response.IsSuccessStatusCode) return curated;
 
             using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
             var root = doc.RootElement;
-            var card = MapSingleTmdbMovie(root, new List<VibeDefinition>());
-            card.WatchProviders = await GetWatchProvidersAsync(tmdbId, region, apiKey, ct);
+            var card = MapSingleTmdbMovie(root, new List<VibeDefinition>(), false);
+
+            card.Tagline = root.TryGetProperty("tagline", out var tagEl) && tagEl.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(tagEl.GetString())
+                ? tagEl.GetString()
+                : null;
+            card.TrailerYoutubeKey = PickTrailerKey(root);
+            ParseCredits(root, card);
+            ParseKeywords(root, card);
+
+            // Vibes do catálogo curado (quando o filme é conhecido) para manter os badges
+            if (curated is not null)
+            {
+                card.MatchedVibes = curated.MatchedVibes;
+                card.VibeMatchScore = curated.VibeMatchScore;
+            }
+
+            if (root.TryGetProperty("watch/providers", out var wp) && wp.TryGetProperty("results", out var wpResults))
+            {
+                card.WatchProviders = ParseRegionProviders(wpResults, tmdbId, region);
+                await SaveProviderCacheBatchAsync(new Dictionary<int, WatchProvidersDto> { [tmdbId] = card.WatchProviders }, region, ct);
+            }
+            else
+            {
+                card.WatchProviders = await GetWatchProvidersAsync(tmdbId, region, apiKey, ct);
+            }
+
             return card;
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             _logger.LogWarning(ex, "Erro ao obter detalhes do filme {TmdbId} no TMDB.", tmdbId);
             return curated;
@@ -237,61 +283,98 @@ public class TmdbHttpClientService : ITmdbService
         string? runtimeApiKey = null,
         CancellationToken ct = default)
     {
-        var normalizedRegion = string.IsNullOrWhiteSpace(region) ? "BR" : region.Trim().ToUpperInvariant();
+        var batch = await GetWatchProvidersBatchAsync(new[] { tmdbId }, region, runtimeApiKey, ct);
+        return batch.TryGetValue(tmdbId, out var dto) ? dto : EmptyProviders(tmdbId, NormalizeRegion(region));
+    }
 
-        // Verifica cache no banco PostgreSQL / SQLite
-        var cached = await _db.CachedMovies
-            .AsNoTracking()
-            .FirstOrDefaultAsync(c => c.TmdbMovieId == tmdbId && c.Region == normalizedRegion && c.ExpiresAt > DateTime.UtcNow, ct);
+    public async Task<Dictionary<int, WatchProvidersDto>> GetWatchProvidersBatchAsync(
+        IEnumerable<int> tmdbIds,
+        string region = "BR",
+        string? runtimeApiKey = null,
+        CancellationToken ct = default)
+    {
+        var normalizedRegion = NormalizeRegion(region);
+        var ids = tmdbIds.Where(id => id > 0).Distinct().ToList();
+        var result = new Dictionary<int, WatchProvidersDto>();
+        if (ids.Count == 0) return result;
 
-        if (cached is not null && !string.IsNullOrWhiteSpace(cached.ProvidersJson))
+        // 1) Cache: UMA consulta para todos os ids (o DbContext não é thread-safe, então nada de DB dentro do paralelo)
+        try
         {
-            var deserialized = JsonSerializer.Deserialize<WatchProvidersDto>(cached.ProvidersJson);
-            if (deserialized is not null) return deserialized;
-        }
+            var now = DateTime.UtcNow;
+            var cachedRows = await _db.CachedMovies
+                .AsNoTracking()
+                .Where(c => ids.Contains(c.TmdbMovieId) && c.Region == normalizedRegion && c.ExpiresAt > now)
+                .Select(c => new { c.TmdbMovieId, c.ProvidersJson })
+                .ToListAsync(ct);
 
-        var apiKey = ResolveApiKey(runtimeApiKey);
-        if (!string.IsNullOrWhiteSpace(apiKey))
-        {
-            try
+            foreach (var row in cachedRows)
             {
-                var client = CreateAuthorizedClient(apiKey);
-                using var response = await client.GetAsync($"movie/{tmdbId}/watch/providers", ct);
-                if (response.IsSuccessStatusCode)
+                if (string.IsNullOrWhiteSpace(row.ProvidersJson)) continue;
+                try
                 {
-                    using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
-                    if (doc.RootElement.TryGetProperty("results", out var results) &&
-                        results.TryGetProperty(normalizedRegion, out var regionNode))
-                    {
-                        var dto = new WatchProvidersDto
-                        {
-                            Region = normalizedRegion,
-                            TmdbWatchLink = regionNode.TryGetProperty("link", out var linkEl) ? linkEl.GetString() : $"https://www.themoviedb.org/movie/{tmdbId}/watch?locale={normalizedRegion}",
-                            Flatrate = ParseProvidersArray(regionNode, "flatrate"),
-                            Rent = ParseProvidersArray(regionNode, "rent"),
-                            Buy = ParseProvidersArray(regionNode, "buy")
-                        };
-
-                        await SaveProviderCacheAsync(tmdbId, normalizedRegion, dto, ct);
-                        return dto;
-                    }
+                    var dto = JsonSerializer.Deserialize<WatchProvidersDto>(row.ProvidersJson);
+                    if (dto is not null) result[row.TmdbMovieId] = dto;
+                }
+                catch (JsonException)
+                {
+                    // cache corrompido: ignora e busca de novo
                 }
             }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Falha ao buscar Watch Providers para {TmdbId}.", tmdbId);
-            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogDebug(ex, "Falha ao ler cache de provedores.");
         }
 
-        var fallbackMovie = CuratedMovieDataset.Movies.FirstOrDefault(m => m.TmdbId == tmdbId);
-        return fallbackMovie?.WatchProviders ?? new WatchProvidersDto
+        var missing = ids.Where(id => !result.ContainsKey(id)).ToList();
+        if (missing.Count == 0) return result;
+
+        // 2) TMDB em paralelo limitado (só HTTP)
+        var apiKey = ResolveApiKey(runtimeApiKey);
+        var fetched = new Dictionary<int, WatchProvidersDto>();
+        if (!string.IsNullOrWhiteSpace(apiKey))
         {
-            Region = normalizedRegion,
-            TmdbWatchLink = $"https://www.themoviedb.org/movie/{tmdbId}/watch?locale={normalizedRegion}",
-            Flatrate = new() { CuratedMovieDataset.PrimeVideo },
-            Rent = new() { CuratedMovieDataset.AppleTv, CuratedMovieDataset.GooglePlay },
-            Buy = new() { CuratedMovieDataset.AppleTv }
-        };
+            var client = CreateAuthorizedClient(apiKey);
+            using var gate = new SemaphoreSlim(MaxParallelProviderRequests);
+            var tasks = missing.Select(async id =>
+            {
+                await gate.WaitAsync(ct);
+                try
+                {
+                    return (Id: id, Dto: await FetchProvidersFromApiAsync(client, id, normalizedRegion, ct));
+                }
+                finally
+                {
+                    gate.Release();
+                }
+            });
+
+            foreach (var (id, dto) in await Task.WhenAll(tasks))
+            {
+                if (dto is not null) fetched[id] = dto;
+            }
+
+            // 3) Grava o cache UMA vez no final
+            if (fetched.Count > 0) await SaveProviderCacheBatchAsync(fetched, normalizedRegion, ct);
+        }
+
+        foreach (var id in missing)
+        {
+            if (fetched.TryGetValue(id, out var dto))
+            {
+                result[id] = dto;
+                continue;
+            }
+
+            // Fallback honesto: dados do catálogo curado se conhecido; senão, lista vazia com o link do TMDB.
+            var curated = CuratedMovieDataset.FindClone(id);
+            result[id] = curated?.WatchProviders is { } cp && string.Equals(cp.Region, normalizedRegion, StringComparison.OrdinalIgnoreCase)
+                ? cp
+                : EmptyProviders(id, normalizedRegion);
+        }
+
+        return result;
     }
 
     public async Task<List<MovieCardDto>> GetNowPlayingMoviesAsync(
@@ -299,6 +382,7 @@ public class TmdbHttpClientService : ITmdbService
         string? runtimeApiKey = null,
         CancellationToken ct = default)
     {
+        region = NormalizeRegion(region);
         var apiKey = ResolveApiKey(runtimeApiKey);
         if (!string.IsNullOrWhiteSpace(apiKey))
         {
@@ -309,28 +393,151 @@ public class TmdbHttpClientService : ITmdbService
                 if (response.IsSuccessStatusCode)
                 {
                     using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
-                    var liveMovies = await ParseTmdbResultsArrayAsync(doc.RootElement, region, apiKey, new List<VibeDefinition>(), ct);
+                    var liveMovies = await ParseTmdbResultsArrayAsync(doc.RootElement, region, apiKey, new List<VibeDefinition>(), false, ct);
                     if (liveMovies.Count > 0) return liveMovies.Take(8).ToList();
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
                 _logger.LogWarning(ex, "Falha ao consultar /movie/now_playing no TMDB. Utilizando lista em cartaz local.");
             }
         }
 
-        // Filmes em destaque para o Radar de Cinemas Locais
+        // Sem chave: destaques do catálogo curado (não são necessariamente lançamentos em cartaz)
         return CuratedMovieDataset.Movies
             .OrderByDescending(m => m.ReleaseYear)
             .ThenByDescending(m => m.VoteAverage)
             .Take(6)
+            .Select(m => m.Clone())
             .ToList();
+    }
+
+    public async Task<List<MovieCardDto>> GetSimilarMoviesAsync(
+        int tmdbId,
+        string region = "BR",
+        string? runtimeApiKey = null,
+        CancellationToken ct = default)
+    {
+        region = NormalizeRegion(region);
+        var apiKey = ResolveApiKey(runtimeApiKey);
+        if (!string.IsNullOrWhiteSpace(apiKey))
+        {
+            try
+            {
+                var client = CreateAuthorizedClient(apiKey);
+                foreach (var endpoint in new[] { "recommendations", "similar" })
+                {
+                    using var response = await client.GetAsync($"movie/{tmdbId}/{endpoint}?language=pt-BR&page=1", ct);
+                    if (!response.IsSuccessStatusCode) continue;
+
+                    using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+                    var movies = await ParseTmdbResultsArrayAsync(doc.RootElement, region, apiKey, new List<VibeDefinition>(), false, ct, take: 8);
+                    movies = movies.Where(m => m.TmdbId != tmdbId).Take(8).ToList();
+                    if (movies.Count > 0) return movies;
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                _logger.LogWarning(ex, "Falha ao consultar recomendações do filme {TmdbId} no TMDB.", tmdbId);
+            }
+        }
+
+        return RankCuratedSimilar(tmdbId, 8);
+    }
+
+    /// <summary>Fallback offline: ranqueia o catálogo curado por vibes (peso 2) e gêneros (peso 1) em comum.</summary>
+    public static List<MovieCardDto> RankCuratedSimilar(int tmdbId, int take)
+    {
+        var source = CuratedMovieDataset.Movies.FirstOrDefault(m => m.TmdbId == tmdbId);
+        var others = CuratedMovieDataset.Movies.Where(m => m.TmdbId != tmdbId);
+
+        if (source is null)
+        {
+            return others.OrderByDescending(m => m.VoteAverage).Take(take).Select(m => m.Clone()).ToList();
+        }
+
+        return others
+            .Select(m => (Movie: m,
+                Vibes: m.MatchedVibes.Intersect(source.MatchedVibes, StringComparer.OrdinalIgnoreCase).Count(),
+                Genres: m.GenreIds.Intersect(source.GenreIds).Count()))
+            .Where(x => x.Vibes + x.Genres > 0)
+            .OrderByDescending(x => x.Vibes * 2 + x.Genres)
+            .ThenByDescending(x => x.Movie.VoteAverage)
+            .Take(take)
+            .Select(x =>
+            {
+                var clone = x.Movie.Clone();
+                clone.VibeMatchScore = Math.Clamp(70 + x.Vibes * 8 + x.Genres * 4, 50, 99);
+                return clone;
+            })
+            .ToList();
+    }
+
+    public async Task<string?> GetAgeRatingAsync(
+        int tmdbId,
+        string region = "BR",
+        string? runtimeApiKey = null,
+        CancellationToken ct = default)
+    {
+        var apiKey = ResolveApiKey(runtimeApiKey);
+        if (string.IsNullOrWhiteSpace(apiKey)) return null;
+        region = NormalizeRegion(region);
+
+        try
+        {
+            var client = CreateAuthorizedClient(apiKey);
+            using var response = await client.GetAsync($"movie/{tmdbId}/release_dates", ct);
+            if (!response.IsSuccessStatusCode) return null;
+
+            using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+            return ParseCertification(doc.RootElement, region);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogDebug(ex, "Falha ao obter classificação indicativa de {TmdbId}.", tmdbId);
+            return null;
+        }
+    }
+
+    /// <summary>Extrai a certificação da região (preferindo lançamento em cinema) e formata em pt-BR ("Livre", "14 anos").</summary>
+    public static string? ParseCertification(JsonElement root, string region)
+    {
+        if (!root.TryGetProperty("results", out var results) || results.ValueKind != JsonValueKind.Array) return null;
+
+        foreach (var r in results.EnumerateArray())
+        {
+            if (!r.TryGetProperty("iso_3166_1", out var isoEl) ||
+                !string.Equals(isoEl.GetString(), region, StringComparison.OrdinalIgnoreCase)) continue;
+            if (!r.TryGetProperty("release_dates", out var dates) || dates.ValueKind != JsonValueKind.Array) continue;
+
+            var cert = dates.EnumerateArray()
+                .Select(d => (
+                    Cert: d.TryGetProperty("certification", out var c) ? c.GetString()?.Trim() : null,
+                    Type: d.TryGetProperty("type", out var t) && t.TryGetInt32(out var ti) ? ti : 99))
+                .Where(x => !string.IsNullOrWhiteSpace(x.Cert))
+                .OrderBy(x => x.Type == 3 ? 0 : x.Type == 2 ? 1 : 2)
+                .Select(x => x.Cert)
+                .FirstOrDefault();
+
+            if (!string.IsNullOrWhiteSpace(cert)) return FormatCertification(cert!);
+        }
+
+        return null;
+    }
+
+    public static string FormatCertification(string cert)
+    {
+        var c = cert.Trim().ToUpperInvariant();
+        if (c is "L" or "AL" or "LIVRE") return "Livre";
+        return int.TryParse(c, NumberStyles.Integer, CultureInfo.InvariantCulture, out var age) ? $"{age} anos" : cert.Trim();
     }
 
     private async Task<DiscoverResultDto?> TryDiscoverFromTmdbApiAsync(
         Dictionary<string, string> tmdbParams,
         List<VibeDefinition> selectedVibes,
-        VibeDiscoverQuery query,
+        bool usedKeywords,
+        List<string> providerNames,
+        string region,
         string apiKey,
         string formulaSummary,
         CancellationToken ct)
@@ -344,13 +551,12 @@ public class TmdbHttpClientService : ITmdbService
 
             using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
             var root = doc.RootElement;
-            var movies = await ParseTmdbResultsArrayAsync(root, query.Region, apiKey, selectedVibes, ct);
+            var movies = await ParseTmdbResultsArrayAsync(root, region, apiKey, selectedVibes, usedKeywords, ct);
 
-            if (!string.IsNullOrWhiteSpace(query.WatchProviderFilter))
+            // Filtro local de segurança (o TMDB já filtrou por with_watch_providers)
+            if (providerNames.Count > 0)
             {
-                movies = movies
-                    .Where(m => m.WatchProviders.Flatrate.Any(p => p.ProviderName.Contains(query.WatchProviderFilter, StringComparison.OrdinalIgnoreCase)))
-                    .ToList();
+                movies = movies.Where(m => m.WatchProviders.Flatrate.Any(p => ProviderCatalog.Matches(p, providerNames))).ToList();
             }
 
             return new DiscoverResultDto
@@ -364,7 +570,7 @@ public class TmdbHttpClientService : ITmdbService
                 Movies = movies
             };
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             _logger.LogWarning(ex, "Erro ao consultar /discover/movie na API do TMDB.");
             return null;
@@ -376,23 +582,29 @@ public class TmdbHttpClientService : ITmdbService
         string region,
         string apiKey,
         List<VibeDefinition> selectedVibes,
-        CancellationToken ct)
+        bool usedKeywords,
+        CancellationToken ct,
+        int take = ResultsPerPage)
     {
         var list = new List<MovieCardDto>();
         if (!root.TryGetProperty("results", out var results) || results.ValueKind != JsonValueKind.Array)
             return list;
 
-        foreach (var item in results.EnumerateArray().Take(12))
+        foreach (var item in results.EnumerateArray().Take(take))
         {
-            var card = MapSingleTmdbMovie(item, selectedVibes);
-            card.WatchProviders = await GetWatchProvidersAsync(card.TmdbId, region, apiKey, ct);
-            list.Add(card);
+            list.Add(MapSingleTmdbMovie(item, selectedVibes, usedKeywords));
+        }
+
+        var providers = await GetWatchProvidersBatchAsync(list.Select(m => m.TmdbId), region, apiKey, ct);
+        foreach (var card in list)
+        {
+            card.WatchProviders = providers.TryGetValue(card.TmdbId, out var p) ? p : EmptyProviders(card.TmdbId, region);
         }
 
         return list;
     }
 
-    private static MovieCardDto MapSingleTmdbMovie(JsonElement item, List<VibeDefinition> selectedVibes)
+    private static MovieCardDto MapSingleTmdbMovie(JsonElement item, List<VibeDefinition> selectedVibes, bool usedKeywords)
     {
         var id = item.TryGetProperty("id", out var idEl) ? idEl.GetInt32() : 0;
         var title = item.TryGetProperty("title", out var tEl) ? tEl.GetString() ?? "" : "";
@@ -423,9 +635,14 @@ public class TmdbHttpClientService : ITmdbService
             }
         }
 
-        int? runtime = item.TryGetProperty("runtime", out var rtEl) && rtEl.ValueKind == JsonValueKind.Number
+        // Sem valores inventados: duração só quando o TMDB informa (o /discover não traz runtime)
+        int? runtime = item.TryGetProperty("runtime", out var rtEl) && rtEl.ValueKind == JsonValueKind.Number && rtEl.GetInt32() > 0
             ? rtEl.GetInt32()
             : null;
+        var voteAverage = item.TryGetProperty("vote_average", out var vaEl) && vaEl.ValueKind == JsonValueKind.Number ? Math.Round(vaEl.GetDouble(), 1) : 0;
+        var voteCount = item.TryGetProperty("vote_count", out var vcEl) && vcEl.ValueKind == JsonValueKind.Number ? vcEl.GetInt32() : 0;
+
+        var (score, matched) = ComputeVibeMatch(genreIds, voteAverage, voteCount, selectedVibes, usedKeywords);
 
         return new MovieCardDto
         {
@@ -437,15 +654,169 @@ public class TmdbHttpClientService : ITmdbService
             BackdropUrl = backdropPath,
             ReleaseDate = releaseDate,
             ReleaseYear = releaseYear,
-            RuntimeMinutes = runtime ?? 118,
-            VoteAverage = item.TryGetProperty("vote_average", out var vaEl) ? Math.Round(vaEl.GetDouble(), 1) : 7.5,
-            VoteCount = item.TryGetProperty("vote_count", out var vcEl) ? vcEl.GetInt32() : 500,
+            RuntimeMinutes = runtime,
+            VoteAverage = voteAverage,
+            VoteCount = voteCount,
             GenreIds = genreIds,
             Genres = genreIds.Select(VibeCatalog.GetGenreName).Distinct().ToList(),
-            MatchedVibes = selectedVibes.Select(v => v.Id).ToList(),
-            VibeMatchScore = 95
+            MatchedVibes = matched,
+            VibeMatchScore = score
         };
     }
+
+    /// <summary>
+    /// Pontuação real de "vibe match" (50–99): sobreposição de gêneros com os gêneros sugeridos das vibes,
+    /// nota média e volume de votos. MatchedVibes = vibes cujos gêneros sugeridos se sobrepõem; se nenhuma
+    /// sobrepor mas o TMDB filtrou por keyword (OR), mantém as vibes selecionadas (o filme bateu alguma keyword).
+    /// </summary>
+    public static (int Score, List<string> MatchedVibes) ComputeVibeMatch(
+        IReadOnlyCollection<int> genreIds,
+        double voteAverage,
+        int voteCount,
+        IReadOnlyCollection<VibeDefinition> selectedVibes,
+        bool usedKeywords)
+    {
+        var matched = selectedVibes
+            .Where(v => v.SuggestedGenreIds.Any(genreIds.Contains))
+            .Select(v => v.Id)
+            .ToList();
+
+        double genreComponent;
+        if (selectedVibes.Count == 0)
+        {
+            genreComponent = 14; // sem vibe: neutro
+        }
+        else
+        {
+            var bestOverlap = selectedVibes
+                .Select(v => v.SuggestedGenreIds.Count == 0 ? 0 : (double)v.SuggestedGenreIds.Count(genreIds.Contains) / v.SuggestedGenreIds.Count)
+                .DefaultIfEmpty(0)
+                .Max();
+            var coverage = (double)matched.Count / selectedVibes.Count;
+            genreComponent = 22 * (0.6 * bestOverlap + 0.4 * coverage);
+            if (usedKeywords) genreComponent += 6; // passou pelo filtro de keywords das vibes
+        }
+
+        var ratingComponent = Math.Clamp((voteAverage - 5.0) * 4.0, 0, 16);       // 5.0 → 0 ; 9.0 → 16
+        var popularityComponent = voteCount > 0 ? Math.Clamp(Math.Log10(voteCount) * 1.6, 0, 6) : 0; // 10k votos ≈ 6
+
+        var score = (int)Math.Round(55 + genreComponent + ratingComponent + popularityComponent);
+        score = Math.Clamp(score, 50, 99);
+
+        if (matched.Count == 0 && usedKeywords)
+            matched = selectedVibes.Select(v => v.Id).ToList();
+
+        return (score, matched);
+    }
+
+    private static string? PickTrailerKey(JsonElement root)
+    {
+        if (!root.TryGetProperty("videos", out var videos) ||
+            !videos.TryGetProperty("results", out var results) ||
+            results.ValueKind != JsonValueKind.Array) return null;
+
+        return results.EnumerateArray()
+            .Where(v => v.TryGetProperty("site", out var s) && string.Equals(s.GetString(), "YouTube", StringComparison.OrdinalIgnoreCase)
+                        && v.TryGetProperty("key", out var k) && !string.IsNullOrWhiteSpace(k.GetString()))
+            .Select(v =>
+            {
+                var type = v.TryGetProperty("type", out var t) ? t.GetString() : null;
+                var lang = v.TryGetProperty("iso_639_1", out var l) ? l.GetString() : null;
+                var official = v.TryGetProperty("official", out var o) && o.ValueKind == JsonValueKind.True;
+                return (Key: v.GetProperty("key").GetString(),
+                    TypeRank: type == "Trailer" ? 0 : type == "Teaser" ? 1 : 2,
+                    LangRank: lang == "pt" ? 0 : lang == "en" ? 1 : 2,
+                    OfficialRank: official ? 0 : 1);
+            })
+            .OrderBy(x => x.TypeRank)
+            .ThenBy(x => x.LangRank)
+            .ThenBy(x => x.OfficialRank)
+            .Select(x => x.Key)
+            .FirstOrDefault();
+    }
+
+    private static void ParseCredits(JsonElement root, MovieCardDto card)
+    {
+        if (!root.TryGetProperty("credits", out var credits)) return;
+
+        if (credits.TryGetProperty("crew", out var crew) && crew.ValueKind == JsonValueKind.Array)
+        {
+            card.Director = crew.EnumerateArray()
+                .Where(c => c.TryGetProperty("job", out var j) && j.GetString() == "Director")
+                .Select(c => c.TryGetProperty("name", out var n) ? n.GetString() : null)
+                .FirstOrDefault(n => !string.IsNullOrWhiteSpace(n)) ?? card.Director;
+        }
+
+        if (credits.TryGetProperty("cast", out var cast) && cast.ValueKind == JsonValueKind.Array)
+        {
+            var names = cast.EnumerateArray()
+                .Select(c => c.TryGetProperty("name", out var n) ? n.GetString() : null)
+                .Where(n => !string.IsNullOrWhiteSpace(n))
+                .Take(6)
+                .Cast<string>()
+                .ToList();
+            if (names.Count > 0) card.Cast = names;
+        }
+    }
+
+    private static void ParseKeywords(JsonElement root, MovieCardDto card)
+    {
+        if (!root.TryGetProperty("keywords", out var kw) ||
+            !kw.TryGetProperty("keywords", out var arr) ||
+            arr.ValueKind != JsonValueKind.Array) return;
+
+        var names = arr.EnumerateArray()
+            .Select(k => k.TryGetProperty("name", out var n) ? n.GetString() : null)
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Take(10)
+            .Cast<string>()
+            .ToList();
+        if (names.Count > 0) card.Keywords = names;
+    }
+
+    private async Task<WatchProvidersDto?> FetchProvidersFromApiAsync(HttpClient client, int tmdbId, string region, CancellationToken ct)
+    {
+        try
+        {
+            using var response = await client.GetAsync($"movie/{tmdbId}/watch/providers", ct);
+            if (!response.IsSuccessStatusCode) return null;
+
+            using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+            return doc.RootElement.TryGetProperty("results", out var results)
+                ? ParseRegionProviders(results, tmdbId, region)
+                : EmptyProviders(tmdbId, region);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "Falha ao buscar Watch Providers para {TmdbId}.", tmdbId);
+            return null;
+        }
+    }
+
+    private static WatchProvidersDto ParseRegionProviders(JsonElement results, int tmdbId, string region)
+    {
+        if (results.ValueKind != JsonValueKind.Object || !results.TryGetProperty(region, out var regionNode))
+            return EmptyProviders(tmdbId, region); // TMDB não lista nenhum provedor nesta região
+
+        return new WatchProvidersDto
+        {
+            Region = region,
+            TmdbWatchLink = regionNode.TryGetProperty("link", out var linkEl) && !string.IsNullOrWhiteSpace(linkEl.GetString())
+                ? linkEl.GetString()
+                : TmdbWatchLink(tmdbId, region),
+            Flatrate = ParseProvidersArray(regionNode, "flatrate"),
+            Rent = ParseProvidersArray(regionNode, "rent"),
+            Buy = ParseProvidersArray(regionNode, "buy")
+        };
+    }
+
+    private static string TmdbWatchLink(int tmdbId, string region) => $"https://www.themoviedb.org/movie/{tmdbId}/watch?locale={region}";
+
+    private static WatchProvidersDto EmptyProviders(int tmdbId, string region) => new()
+    {
+        Region = region,
+        TmdbWatchLink = TmdbWatchLink(tmdbId, region)
+    };
 
     private static List<StreamingProviderBadgeDto> ParseProvidersArray(JsonElement regionNode, string key)
     {
@@ -468,44 +839,55 @@ public class TmdbHttpClientService : ITmdbService
         return list.OrderBy(x => x.DisplayPriority).ToList();
     }
 
-    private async Task SaveProviderCacheAsync(int tmdbId, string region, WatchProvidersDto dto, CancellationToken ct)
+    private async Task SaveProviderCacheBatchAsync(Dictionary<int, WatchProvidersDto> dtos, string region, CancellationToken ct)
     {
+        if (dtos.Count == 0) return;
         try
         {
-            var existing = await _db.CachedMovies
-                .FirstOrDefaultAsync(c => c.TmdbMovieId == tmdbId && c.Region == region, ct);
+            var ids = dtos.Keys.ToList();
+            var existingRows = await _db.CachedMovies
+                .Where(c => ids.Contains(c.TmdbMovieId) && c.Region == region)
+                .ToListAsync(ct);
 
-            var json = JsonSerializer.Serialize(dto);
-            if (existing is not null)
+            var now = DateTime.UtcNow;
+            foreach (var (id, dto) in dtos)
             {
-                existing.ProvidersJson = json;
-                existing.CachedAt = DateTime.UtcNow;
-                existing.ExpiresAt = DateTime.UtcNow.AddHours(12);
-            }
-            else
-            {
-                _db.CachedMovies.Add(new CachedMovie
+                var json = JsonSerializer.Serialize(dto);
+                var existing = existingRows.FirstOrDefault(r => r.TmdbMovieId == id);
+                if (existing is not null)
                 {
-                    TmdbMovieId = tmdbId,
-                    Region = region,
-                    ProvidersJson = json,
-                    CachedAt = DateTime.UtcNow,
-                    ExpiresAt = DateTime.UtcNow.AddHours(12)
-                });
+                    existing.ProvidersJson = json;
+                    existing.CachedAt = now;
+                    existing.ExpiresAt = now.Add(ProviderCacheTtl);
+                }
+                else
+                {
+                    _db.CachedMovies.Add(new CachedMovie
+                    {
+                        TmdbMovieId = id,
+                        Region = region,
+                        ProvidersJson = json,
+                        CachedAt = now,
+                        ExpiresAt = now.Add(ProviderCacheTtl)
+                    });
+                }
             }
 
             await _db.SaveChangesAsync(ct);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            _logger.LogDebug(ex, "Não foi possível gravar cache de provedores para {TmdbId}.", tmdbId);
+            _logger.LogDebug(ex, "Não foi possível gravar cache de provedores.");
+            _db.ChangeTracker.Clear();
         }
     }
 
+    /// <summary>Filtra e pontua o catálogo/lista SEM alterar os objetos de origem (devolve clones).</summary>
     private static List<MovieCardDto> FilterMovieListLocally(
-        List<MovieCardDto> source,
+        IEnumerable<MovieCardDto> source,
         VibeDiscoverQuery query,
         List<VibeDefinition> selectedVibes,
+        List<string> providerNames,
         int? maxRuntime,
         string? releaseGte,
         string? releaseLte,
@@ -515,13 +897,13 @@ public class TmdbHttpClientService : ITmdbService
 
         if (!string.IsNullOrWhiteSpace(query.SearchText))
         {
-            var q = query.SearchText.Trim().ToLowerInvariant();
+            var q = TextNormalizer.Normalize(query.SearchText);
             filtered = filtered.Where(m =>
-                m.Title.ToLowerInvariant().Contains(q) ||
-                m.OriginalTitle.ToLowerInvariant().Contains(q) ||
-                m.Overview.ToLowerInvariant().Contains(q) ||
-                m.Keywords.Any(k => k.ToLowerInvariant().Contains(q)) ||
-                (m.Director?.ToLowerInvariant().Contains(q) ?? false));
+                TextNormalizer.Normalize(m.Title).Contains(q) ||
+                TextNormalizer.Normalize(m.OriginalTitle).Contains(q) ||
+                TextNormalizer.Normalize(m.Overview).Contains(q) ||
+                m.Keywords.Any(k => TextNormalizer.Normalize(k).Contains(q)) ||
+                TextNormalizer.Normalize(m.Director).Contains(q));
         }
 
         if (selectedVibes.Count > 0)
@@ -556,56 +938,59 @@ public class TmdbHttpClientService : ITmdbService
             filtered = filtered.Where(m => m.VoteAverage >= minVoteAverage.Value);
         }
 
-        if (!string.IsNullOrWhiteSpace(query.WatchProviderFilter))
+        if (providerNames.Count > 0)
         {
-            filtered = filtered.Where(m =>
-                m.WatchProviders.Flatrate.Any(p => p.ProviderName.Contains(query.WatchProviderFilter, StringComparison.OrdinalIgnoreCase)));
+            filtered = filtered.Where(m => m.WatchProviders.Flatrate.Any(p => ProviderCatalog.Matches(p, providerNames)));
         }
 
-        var resultList = filtered
+        return filtered
             .Select(m =>
             {
+                var clone = m.Clone();
                 var matchCount = selectedVibes.Count == 0
                     ? 1
-                    : m.MatchedVibes.Count(mv => selectedVibes.Any(sv => sv.Id == mv));
-                var score = Math.Min(99, 86 + (matchCount * 5) + (int)Math.Round(m.VoteAverage - 7.0));
-                m.VibeMatchScore = Math.Max(80, score);
-                return m;
+                    : clone.MatchedVibes.Count(mv => selectedVibes.Any(sv => sv.Id == mv));
+                var score = Math.Min(99, 86 + (matchCount * 5) + (int)Math.Round(clone.VoteAverage - 7.0));
+                clone.VibeMatchScore = Math.Max(80, score);
+                return clone;
             })
             .OrderByDescending(m => m.VibeMatchScore)
             .ThenByDescending(m => m.VoteAverage)
             .ToList();
-
-        return resultList;
     }
+
+    private static string NormalizeRegion(string? region) =>
+        string.IsNullOrWhiteSpace(region) ? "BR" : region.Trim().ToUpperInvariant();
 
     private string? ResolveApiKey(string? runtimeApiKey)
     {
         if (!string.IsNullOrWhiteSpace(runtimeApiKey))
             return runtimeApiKey.Trim();
 
-        var configKey = _configuration["Tmdb:ApiKey"]
-                        ?? _configuration["Tmdb:ReadAccessToken"]
-                        ?? Environment.GetEnvironmentVariable("TMDB__ApiKey")
-                        ?? Environment.GetEnvironmentVariable("TMDB_API_KEY");
+        var candidates = new[]
+        {
+            _configuration["Tmdb:ApiKey"],
+            _configuration["Tmdb:ReadAccessToken"],
+            Environment.GetEnvironmentVariable("TMDB__ApiKey"),
+            Environment.GetEnvironmentVariable("TMDB_API_KEY")
+        };
 
+        var configKey = candidates.FirstOrDefault(k => !string.IsNullOrWhiteSpace(k));
         return string.IsNullOrWhiteSpace(configKey) ? null : configKey.Trim();
     }
 
     private HttpClient CreateAuthorizedClient(string apiKey)
     {
         var client = _httpClientFactory.CreateClient("TmdbClient");
-        client.BaseAddress = new Uri("https://api.themoviedb.org/3/");
+        client.BaseAddress ??= new Uri("https://api.themoviedb.org/3/");
 
-        // Se for um JWT Read Access Token (v4), usa Bearer; se for chave v3 (32 hex chars), adiciona api_key ou Bearer
+        // JWT Read Access Token (v4) → Bearer; chave v3 (32 hex) → header interno convertido em ?api_key= pelo TmdbApiKeyQueryHandler
         if (apiKey.StartsWith("eyJ", StringComparison.Ordinal))
         {
             client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
         }
         else
         {
-            // Para chaves v3 de 32 caracteres, registramos um handler ou passamos via DefaultRequestHeaders se suportado,
-            // ou anexam api_key na requisição via BaseAddress/Handler.
             client.DefaultRequestHeaders.Remove("X-Api-Key-V3");
             client.DefaultRequestHeaders.Add("X-Api-Key-V3", apiKey);
         }

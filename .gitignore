@@ -9,6 +9,7 @@ obj/
 *.db
 *.db-shm
 *.db-wal
+jwt.key
 TestResults/
 coverage/
 

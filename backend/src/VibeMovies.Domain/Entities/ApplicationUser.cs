@@ -8,6 +8,10 @@ public class ApplicationUser
     public string PasswordHash { get; set; } = string.Empty;
     public string PreferredRegion { get; set; } = "BR";
     public string DefaultCity { get; set; } = "Joinville/SC";
+
+    /// <summary>Streamings que o usuário assina, separados por vírgula (ex.: "Netflix,Max").</summary>
+    public string MyProvidersCsv { get; set; } = string.Empty;
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     public ICollection<WatchlistItem> WatchlistItems { get; set; } = new List<WatchlistItem>();

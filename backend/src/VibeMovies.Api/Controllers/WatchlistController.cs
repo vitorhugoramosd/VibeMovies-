@@ -1,7 +1,9 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using VibeMovies.Api.Infrastructure;
 using VibeMovies.Application.Interfaces;
+using VibeMovies.Application.Services;
 using VibeMovies.Domain.Entities;
 using VibeMovies.Domain.Models;
 
@@ -13,10 +15,14 @@ namespace VibeMovies.Api.Controllers;
 public class WatchlistController : ControllerBase
 {
     private readonly IWatchlistRepository _watchlistRepository;
+    private readonly RecommendationService _recommendations;
+    private readonly TimeProvider _timeProvider;
 
-    public WatchlistController(IWatchlistRepository watchlistRepository)
+    public WatchlistController(IWatchlistRepository watchlistRepository, RecommendationService recommendations, TimeProvider timeProvider)
     {
         _watchlistRepository = watchlistRepository;
+        _recommendations = recommendations;
+        _timeProvider = timeProvider;
     }
 
     private Guid GetUserId()
@@ -44,29 +50,35 @@ public class WatchlistController : ControllerBase
         if (userId == Guid.Empty) return Unauthorized();
 
         var all = await _watchlistRepository.GetByUserIdAsync(userId, null, ct);
-        var wantToWatch = all.Where(x => x.ListType == WatchlistType.WantToWatch).ToList();
-        var watched = all.Where(x => x.ListType == WatchlistType.Watched).ToList();
+        return Ok(WatchlistStatsCalculator.Compute(all, _timeProvider));
+    }
 
-        var rated = watched.Where(x => x.PersonalRating.HasValue).ToList();
-        var avgRating = rated.Count > 0
-            ? Math.Round(rated.Average(x => x.PersonalRating!.Value), 1)
-            : 0.0;
+    /// <summary>"Para você": recomendações a partir dos assistidos com nota ≥4 e do Quero Ver (exclui o que já está no Diário).</summary>
+    [HttpGet("recommendations")]
+    public async Task<ActionResult<List<MovieCardDto>>> GetRecommendations([FromQuery] string region = "BR", CancellationToken ct = default)
+    {
+        var userId = GetUserId();
+        if (userId == Guid.Empty) return Unauthorized();
 
-        var topGenre = all
-            .SelectMany(x => (x.GenresCsv ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            .GroupBy(g => g)
-            .OrderByDescending(g => g.Count())
-            .Select(g => g.Key)
-            .FirstOrDefault() ?? "Suspense / Thriller";
+        var runtimeApiKey = Request.Headers["X-TMDB-Api-Key"].FirstOrDefault();
+        return Ok(await _recommendations.GetForUserAsync(userId, region, runtimeApiKey, 12, ct));
+    }
 
-        return Ok(new WatchlistStatsDto
+    /// <summary>Exporta o Diário: CSV (";" + BOM UTF-8, Excel pt-BR) ou JSON.</summary>
+    [HttpGet("export")]
+    public async Task<IActionResult> Export([FromQuery] string format = "csv", CancellationToken ct = default)
+    {
+        var userId = GetUserId();
+        if (userId == Guid.Empty) return Unauthorized();
+
+        var items = await _watchlistRepository.GetByUserIdAsync(userId, null, ct);
+        var stamp = _timeProvider.GetLocalNow().ToString("yyyyMMdd");
+        return format.Trim().ToLowerInvariant() switch
         {
-            TotalWantToWatch = wantToWatch.Count,
-            TotalWatched = watched.Count,
-            TotalMinutesWatched = watched.Sum(x => x.RuntimeMinutes ?? 120),
-            AveragePersonalRating = avgRating,
-            FavoriteGenre = topGenre
-        });
+            "json" => File(WatchlistExporter.ToJson(items), "application/json; charset=utf-8", $"vibemovies-diario-{stamp}.json"),
+            "csv" => File(WatchlistExporter.ToCsv(items), "text/csv; charset=utf-8", $"vibemovies-diario-{stamp}.csv"),
+            _ => GlobalExceptionHandler.Problem(StatusCodes.Status400BadRequest, "Formato inválido. Use format=csv ou format=json.")
+        };
     }
 
     [HttpPost]
@@ -88,7 +100,7 @@ public class WatchlistController : ControllerBase
             ReleaseYear = dto.ReleaseYear,
             Overview = dto.Overview ?? "",
             ListType = dto.ListType,
-            PersonalRating = dto.PersonalRating is >= 1 and <= 5 ? dto.PersonalRating : null,
+            PersonalRating = dto.PersonalRating,
             PersonalNotes = dto.PersonalNotes,
             WatchedAt = dto.WatchedAt,
             GenresCsv = dto.GenresCsv ?? "",

@@ -8,6 +8,11 @@ namespace VibeMovies.Infrastructure.External;
 /// </summary>
 public static class CuratedMovieDataset
 {
+    /// <summary>Cópias independentes do catálogo (nunca devolva/mutile os objetos estáticos compartilhados).</summary>
+    public static List<MovieCardDto> CloneAll() => Movies.Select(m => m.Clone()).ToList();
+
+    public static MovieCardDto? FindClone(int tmdbId) => Movies.FirstOrDefault(m => m.TmdbId == tmdbId)?.Clone();
+
     public static readonly StreamingProviderBadgeDto Netflix = new()
     {
         ProviderId = 8,

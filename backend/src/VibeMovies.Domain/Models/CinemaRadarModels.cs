@@ -6,13 +6,19 @@ public class CinemaRadarResponseDto
     public string State { get; set; } = string.Empty;
     public DateTime ScrapedAt { get; set; } = DateTime.UtcNow;
     public string ScraperSource { get; set; } = string.Empty;
+
+    /// <summary>true quando os horários NÃO vieram de uma fonte real (grade ilustrativa gerada localmente).</summary>
+    public bool IsSimulatedSchedule { get; set; }
+
+    /// <summary>Aviso em pt-BR para exibir ao usuário (ex.: horários ilustrativos).</summary>
+    public string Notice { get; set; } = string.Empty;
     public List<NowPlayingMovieWithShowtimesDto> MoviesInTheaters { get; set; } = new();
 }
 
 public class NowPlayingMovieWithShowtimesDto
 {
     public MovieCardDto Movie { get; set; } = new();
-    public string AgeRating { get; set; } = "14 anos";
+    public string AgeRating { get; set; } = "Classificação não informada";
     public List<CinemaVenueShowtimesDto> Venues { get; set; } = new();
 }
 

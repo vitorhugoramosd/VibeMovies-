@@ -1,4 +1,3 @@
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using VibeMovies.Application.Catalog;
@@ -14,22 +13,6 @@ namespace VibeMovies.Tests;
 
 public class VibeMoviesTests
 {
-    private sealed class FakeHttpClientFactory : IHttpClientFactory
-    {
-        public HttpClient CreateClient(string name) => new()
-        {
-            BaseAddress = new Uri("https://api.themoviedb.org/3/")
-        };
-    }
-
-    private static VibeMoviesDbContext CreateInMemoryDb()
-    {
-        var options = new DbContextOptionsBuilder<VibeMoviesDbContext>()
-            .UseInMemoryDatabase($"VibeMoviesTestDb_{Guid.NewGuid()}")
-            .Options;
-        return new VibeMoviesDbContext(options);
-    }
-
     [Fact]
     public void VibeCatalog_ShouldContainPredefinedVibesMappedToTmdbKeywordIds()
     {
@@ -49,13 +32,8 @@ public class VibeMoviesTests
     [Fact]
     public async Task DiscoverByVibe_ShouldCombineVibesGenresAndMaxRuntimeAndIncludeWatchProviders()
     {
-        using var db = CreateInMemoryDb();
-        var config = new ConfigurationBuilder().AddInMemoryCollection().Build();
-        var tmdbService = new TmdbHttpClientService(
-            new FakeHttpClientFactory(),
-            config,
-            db,
-            NullLogger<TmdbHttpClientService>.Instance);
+        using var testDb = new SqliteTestDb();
+        var tmdbService = testDb.CreateTmdbService();
 
         var query = new VibeDiscoverQuery
         {
@@ -85,14 +63,9 @@ public class VibeMoviesTests
     [Fact]
     public async Task CinemaRadarScraper_ShouldParseShowtimesWithHtmlAgilityPackForJoinville()
     {
-        using var db = CreateInMemoryDb();
-        var config = new ConfigurationBuilder().AddInMemoryCollection().Build();
+        using var testDb = new SqliteTestDb();
         var httpFactory = new FakeHttpClientFactory();
-        var tmdbService = new TmdbHttpClientService(
-            httpFactory,
-            config,
-            db,
-            NullLogger<TmdbHttpClientService>.Instance);
+        var tmdbService = testDb.CreateTmdbService();
 
         var radarService = new CinemaRadarScraperService(
             tmdbService,
@@ -111,12 +84,19 @@ public class VibeMoviesTests
         Assert.NotEmpty(firstMovie.Venues);
         Assert.Contains(firstMovie.Venues, v => v.CinemaChain.Contains("GNC Cinemas"));
         Assert.All(firstMovie.Venues, v => Assert.NotEmpty(v.Sessions));
+
+        // Honestidade: grade ilustrativa sinalizada, classificação não inventada, ingresso via busca real
+        Assert.True(radar.IsSimulatedSchedule);
+        Assert.False(string.IsNullOrWhiteSpace(radar.Notice));
+        Assert.All(radar.MoviesInTheaters, m => Assert.Equal("Classificação não informada", m.AgeRating));
+        Assert.All(firstMovie.Venues.SelectMany(v => v.Sessions), s => Assert.StartsWith("https://www.ingresso.com/busca?q=", s.TicketUrl));
     }
 
     [Fact]
     public async Task AuthAndWatchlist_ShouldRegisterLoginAndPersistWantToWatchAndWatchedLists()
     {
-        using var db = CreateInMemoryDb();
+        using var testDb = new SqliteTestDb();
+        var db = testDb.Db;
         var userRepo = new UserRepository(db);
         var watchlistRepo = new WatchlistRepository(db);
         var authService = new AuthService(userRepo, u => $"test-jwt-for-{u.Email}");

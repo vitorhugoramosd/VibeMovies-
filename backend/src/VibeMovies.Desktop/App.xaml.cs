@@ -52,6 +52,7 @@ public partial class App : System.Windows.Application
 
         DbContext = new VibeMoviesDbContext(optionsBuilder.Options);
         await DbContext.Database.EnsureCreatedAsync();
+        await DatabaseSchemaUpgrader.UpgradeAsync(DbContext); // adiciona colunas novas em bancos antigos
 
         var userRepo = new UserRepository(DbContext);
         var watchlistRepo = new WatchlistRepository(DbContext);

@@ -83,11 +83,24 @@ public class AuthService : IAuthService
 
     public bool VerifyPassword(string password, string passwordHash)
     {
+        if (string.IsNullOrEmpty(password) || string.IsNullOrWhiteSpace(passwordHash)) return false;
+
         var parts = passwordHash.Split('.');
         if (parts.Length != 2) return false;
 
-        var salt = Convert.FromBase64String(parts[0]);
-        var expectedHash = Convert.FromBase64String(parts[1]);
+        byte[] salt;
+        byte[] expectedHash;
+        try
+        {
+            salt = Convert.FromBase64String(parts[0]);
+            expectedHash = Convert.FromBase64String(parts[1]);
+        }
+        catch (FormatException)
+        {
+            return false; // hash corrompido/malformado: trata como senha inválida em vez de estourar 500
+        }
+
+        if (salt.Length == 0 || expectedHash.Length != 32) return false;
 
         var actualHash = Rfc2898DeriveBytes.Pbkdf2(
             Encoding.UTF8.GetBytes(password),

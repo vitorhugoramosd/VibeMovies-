@@ -25,6 +25,7 @@ public class VibeMoviesDbContext : DbContext
             entity.Property(u => u.Email).HasMaxLength(180).IsRequired();
             entity.Property(u => u.PreferredRegion).HasMaxLength(10).HasDefaultValue("BR");
             entity.Property(u => u.DefaultCity).HasMaxLength(100).HasDefaultValue("Joinville/SC");
+            entity.Property(u => u.MyProvidersCsv).HasMaxLength(500).IsRequired().HasDefaultValue(string.Empty);
         });
 
         modelBuilder.Entity<WatchlistItem>(entity =>

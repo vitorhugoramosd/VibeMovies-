@@ -59,6 +59,9 @@ public class WatchlistRepository : IWatchlistRepository
             existing.Title = string.IsNullOrWhiteSpace(item.Title) ? existing.Title : item.Title;
             existing.PosterPath = string.IsNullOrWhiteSpace(item.PosterPath) ? existing.PosterPath : item.PosterPath;
             existing.RuntimeMinutes = item.RuntimeMinutes ?? existing.RuntimeMinutes;
+            if (string.IsNullOrWhiteSpace(existing.GenresCsv)) existing.GenresCsv = item.GenresCsv;
+            if (existing.TmdbVoteAverage <= 0) existing.TmdbVoteAverage = item.TmdbVoteAverage;
+            if (existing.ReleaseYear is null) existing.ReleaseYear = item.ReleaseYear;
             await _db.SaveChangesAsync(ct);
             return existing;
         }

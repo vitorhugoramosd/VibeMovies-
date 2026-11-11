@@ -48,38 +48,68 @@ public class CinemaRadarScraperService : ICinemaRadarService
         var stateCode = parts.Length > 1 ? parts[1].Trim().ToUpperInvariant() : "SC";
 
         var nowPlayingMovies = await _tmdbService.GetNowPlayingMoviesAsync("BR", runtimeApiKey, ct);
+        var usingLiveTmdb = _tmdbService.HasApiKey(runtimeApiKey);
 
-        // Executa o parser HtmlAgilityPack sobre a grade HTML da programação local
+        // Grade de horários: não há integração com a programação real das redes, então a grade é
+        // ILUSTRATIVA (gerada localmente) e passa pelo mesmo parser HtmlAgilityPack usado para HTML real.
         var htmlSchedule = await FetchOrBuildCityScheduleHtmlAsync(cityName, stateCode, nowPlayingMovies, ct);
         var parsedVenuesByMovie = ParseShowtimesWithHtmlAgilityPack(htmlSchedule);
+        const bool isSimulatedSchedule = true;
 
-        var ageRatings = new[] { "14 anos", "16 anos", "12 anos", "14 anos", "18 anos", "Livre" };
-        var resultItems = new List<NowPlayingMovieWithShowtimesDto>();
-
-        for (int i = 0; i < nowPlayingMovies.Count; i++)
+        // Classificação indicativa real (TMDB release_dates/BR) quando há chave — chamadas em paralelo limitado
+        var ageRatings = new Dictionary<int, string?>();
+        if (usingLiveTmdb)
         {
-            var movie = nowPlayingMovies[i];
+            using var gate = new SemaphoreSlim(4);
+            var tasks = nowPlayingMovies.Select(async m =>
+            {
+                await gate.WaitAsync(ct);
+                try { return (m.TmdbId, Rating: await _tmdbService.GetAgeRatingAsync(m.TmdbId, "BR", runtimeApiKey, ct)); }
+                finally { gate.Release(); }
+            });
+            foreach (var (id, rating) in await Task.WhenAll(tasks)) ageRatings[id] = rating;
+        }
+
+        var resultItems = new List<NowPlayingMovieWithShowtimesDto>();
+        foreach (var movie in nowPlayingMovies)
+        {
             var venues = parsedVenuesByMovie.TryGetValue(movie.TmdbId, out var vList)
                 ? vList
-                : parsedVenuesByMovie.Values.FirstOrDefault() ?? new List<CinemaVenueShowtimesDto>();
+                : new List<CinemaVenueShowtimesDto>();
 
             resultItems.Add(new NowPlayingMovieWithShowtimesDto
             {
                 Movie = movie,
-                AgeRating = ageRatings[i % ageRatings.Length],
+                AgeRating = ageRatings.TryGetValue(movie.TmdbId, out var r) && !string.IsNullOrWhiteSpace(r) ? r! : NotInformedRating,
                 Venues = venues
             });
         }
+
+        var notice = isSimulatedSchedule
+            ? "Horários ilustrativos: a programação real dos cinemas não foi consultada. Confirme sessões e compre ingressos pelo link de cada sessão (busca no Ingresso.com) ou no site da rede."
+            : string.Empty;
+        if (!usingLiveTmdb)
+            notice += " Sem chave do TMDB, a lista de filmes vem do catálogo local de demonstração (não necessariamente em cartaz).";
 
         return new CinemaRadarResponseDto
         {
             City = cityName,
             State = stateCode,
             ScrapedAt = DateTime.UtcNow,
-            ScraperSource = $"HtmlAgilityPack DOM Parser • Programação Local ({cityName}/{stateCode})",
+            ScraperSource = usingLiveTmdb
+                ? $"TMDB Now Playing (BR) + HtmlAgilityPack DOM Parser • Grade ilustrativa ({cityName}/{stateCode})"
+                : $"Catálogo local + HtmlAgilityPack DOM Parser • Grade ilustrativa ({cityName}/{stateCode})",
+            IsSimulatedSchedule = isSimulatedSchedule,
+            Notice = notice.Trim(),
             MoviesInTheaters = resultItems
         };
     }
+
+    public const string NotInformedRating = "Classificação não informada";
+
+    /// <summary>Link real de busca do filme no Ingresso.com (em vez de URLs inventadas).</summary>
+    public static string BuildTicketSearchUrl(string movieTitle) =>
+        $"https://www.ingresso.com/busca?q={Uri.EscapeDataString(movieTitle.Trim())}";
 
     /// <summary>
     /// Utiliza o HtmlAgilityPack (HtmlDocument + XPath) para extrair redes, salas, tipos de áudio e horários de exibição.
@@ -119,7 +149,7 @@ public class CinemaRadarScraperService : ICinemaRadarService
                                 Time = sNode.GetAttributeValue("data-time", "19:30"),
                                 RoomType = sNode.GetAttributeValue("data-room", "Sala 2D"),
                                 AudioType = sNode.GetAttributeValue("data-audio", "Legendado"),
-                                TicketUrl = sNode.GetAttributeValue("data-url", "https://www.ingresso.com")
+                                TicketUrl = HtmlEntity.DeEntitize(sNode.GetAttributeValue("data-url", "https://www.ingresso.com"))
                             });
                         }
                     }
@@ -174,7 +204,8 @@ public class CinemaRadarScraperService : ICinemaRadarService
 
                 foreach (var s in baseHours)
                 {
-                    sb.AppendLine($"      <li class='session-item' data-time='{s.Time}' data-room='{s.Room}' data-audio='{s.Audio}' data-url='{theater.TicketUrl}' />");
+                    var ticketUrl = System.Net.WebUtility.HtmlEncode(BuildTicketSearchUrl(m.Title));
+                    sb.AppendLine($"      <li class='session-item' data-time='{s.Time}' data-room='{s.Room}' data-audio='{s.Audio}' data-url='{ticketUrl}' />");
                 }
 
                 sb.AppendLine("    </ul>");
@@ -196,7 +227,7 @@ public class CinemaRadarScraperService : ICinemaRadarService
             return new()
             {
                 ("GNC Cinemas", "GNC Cinemas — Garten Shopping", "Av. Rolf Wiest, 333 - Bom Retiro, Joinville/SC", "Sala VIP • Dolby Atmos", "https://www.gnccinemas.com.br"),
-                ("GNC Cinemas", "GNC Cinemas —Shopping Mueller Joinville", "Rua Visconde de Taunay, 235 - Centro, Joinville/SC", "Sala 1 • Laser 2D", "https://www.gnccinemas.com.br")
+                ("GNC Cinemas", "GNC Cinemas — Shopping Mueller Joinville", "Rua Visconde de Taunay, 235 - Centro, Joinville/SC", "Sala 1 • Laser 2D", "https://www.gnccinemas.com.br")
             };
         }
         if (lower.Contains("florian"))
@@ -226,8 +257,9 @@ public class CinemaRadarScraperService : ICinemaRadarService
 
         return new()
         {
-            ("GNC Cinemas", $"GNC Cinemas — Shopping Center {city}", $"Centro, {city}/{state}", "Sala VIP • Laser", "https://www.ingresso.com"),
-            ("Cinemark", $"Cinemark — Plaza {city}", $"Av. Principal, 1000 - {city}/{state}", "Sala XD • Som Dolby", "https://www.cinemark.com.br")
+            // Cidade sem cadastro: cinemas genéricos de exemplo (sem endereço inventado)
+            ("Cinema local", $"Cinema de {city} (exemplo)", $"{city}/{state} — endereço não cadastrado", "Sala Premium", "https://www.ingresso.com"),
+            ("Cinema local", $"Cinema de {city} 2 (exemplo)", $"{city}/{state} — endereço não cadastrado", "Sala 3D", "https://www.ingresso.com")
         };
     }
 }
