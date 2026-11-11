@@ -55,6 +55,9 @@ export interface MovieCardDto {
   cast: string[];
   watchProviders: WatchProvidersDto;
   vibeMatchScore: number;
+  trailerYoutubeKey?: string | null;
+  tagline?: string | null;
+  recommendationReason?: string | null;
 }
 
 export interface DiscoverResultDto {
@@ -93,6 +96,8 @@ export interface CinemaRadarResponseDto {
   scrapedAt: string;
   scraperSource: string;
   moviesInTheaters: NowPlayingMovieWithShowtimesDto[];
+  isSimulatedSchedule?: boolean;
+  notice?: string;
 }
 
 export enum WatchlistType {
@@ -126,6 +131,15 @@ export interface WatchlistStatsDto {
   totalMinutesWatched: number;
   averagePersonalRating: number;
   favoriteGenre: string;
+  genreBreakdown?: NameCountDto[];
+  ratingDistribution?: Record<string, number>;
+  watchedPerMonth?: NameCountDto[];
+  totalHoursWatched?: number;
+}
+
+export interface NameCountDto {
+  name: string;
+  count: number;
 }
 
 export interface AuthResponseDto {
@@ -135,4 +149,46 @@ export interface AuthResponseDto {
   email: string;
   preferredRegion: string;
   defaultCity: string;
+  myProviders?: string[];
+}
+
+/** Shape returned by GET/PUT /api/auth/me. */
+export interface UserProfileDto {
+  userId?: string;
+  name: string;
+  email?: string;
+  preferredRegion: string;
+  defaultCity: string;
+  myProviders: string[];
+}
+
+export interface UpdateProfileRequest {
+  name: string;
+  defaultCity: string;
+  preferredRegion: string;
+  myProviders: string[];
+}
+
+export interface SurpriseResponseDto {
+  movie: MovieCardDto;
+  reason: string;
+  spokenText: string;
+}
+
+export type SortOption =
+  | 'popularity.desc'
+  | 'vote_average.desc'
+  | 'primary_release_date.desc'
+  | 'primary_release_date.asc';
+
+export interface DiscoverFilters {
+  vibes: string[];
+  genres: number[];
+  maxRuntime: number | null;
+  decade: number | null;
+  minRating: number | null;
+  search: string;
+  providers: string[];
+  onlyMyProviders: boolean;
+  sortBy: SortOption;
 }

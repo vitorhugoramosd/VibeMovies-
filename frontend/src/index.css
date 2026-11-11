@@ -8,6 +8,43 @@
     color: #F1F5F9;
     font-family: 'Inter', system-ui, sans-serif;
   }
+
+  /* Visible keyboard focus everywhere, invisible for mouse clicks. */
+  :focus-visible {
+    outline: 2px solid #A78BFA;
+    outline-offset: 2px;
+  }
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible {
+    outline-offset: 0;
+  }
+}
+
+@layer components {
+  .skeleton {
+    background: linear-gradient(90deg, #12141F 0%, #1C1F30 50%, #12141F 100%);
+    background-size: 200% 100%;
+    @apply animate-shimmer;
+  }
+
+  .scrollbar-none {
+    scrollbar-width: none;
+  }
+  .scrollbar-none::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* Custom Scrollbar */

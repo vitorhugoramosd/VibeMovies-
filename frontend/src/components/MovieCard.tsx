@@ -1,6 +1,7 @@
 import React from 'react';
 import { Bookmark, CheckCircle2, Clock, Eye, Sparkles, Star } from 'lucide-react';
 import { MovieCardDto, WatchlistItem, WatchlistType } from '../types/api';
+import { PosterImage } from './PosterImage';
 
 interface MovieCardProps {
   movie: MovieCardDto;
@@ -9,12 +10,12 @@ interface MovieCardProps {
   onQuickSave: (movie: MovieCardDto, type: WatchlistType) => void;
 }
 
-export const MovieCard: React.FC<MovieCardProps> = ({
+export const MovieCard = React.memo(function MovieCard({
   movie,
   watchlistEntry,
   onSelectMovie,
   onQuickSave
-}) => {
+}: MovieCardProps) {
   const flatrate = movie.watchProviders?.flatrate || [];
   const rent = movie.watchProviders?.rent || [];
 
@@ -22,18 +23,20 @@ export const MovieCard: React.FC<MovieCardProps> = ({
   const isWatched = watchlistEntry?.listType === WatchlistType.Watched;
 
   return (
-    <div
-      className="group relative flex flex-col bg-[#12141F]/90 border border-slate-800/80 rounded-2xl overflow-hidden hover:border-violet-500/60 transition-all duration-300 hover:-translate-y-1 hover:shadow-2xl hover:shadow-violet-950/30"
+    <article
+      className="group relative flex flex-col bg-[#12141F]/90 border border-slate-800/80 rounded-2xl overflow-hidden hover:border-violet-500/60 focus-within:border-violet-500/60 transition-all duration-300 hover:-translate-y-1 hover:shadow-2xl hover:shadow-violet-950/30"
     >
       {/* Poster Container */}
-      <div
+      <button
+        type="button"
         onClick={() => onSelectMovie(movie)}
-        className="relative aspect-[2/3] w-full overflow-hidden bg-slate-900 cursor-pointer"
+        aria-label={`Ver detalhes de ${movie.title}`}
+        className="relative block text-left aspect-[2/3] w-full overflow-hidden bg-slate-900 cursor-pointer focus-visible:outline-offset-[-2px]"
       >
-        <img
+        <PosterImage
           src={movie.posterUrl}
-          alt={movie.title}
-          loading="lazy"
+          alt=""
+          fallbackTitle={movie.title}
           className="h-full w-full object-cover object-center group-hover:scale-105 transition-transform duration-500"
         />
         <div className="absolute inset-0 bg-gradient-to-t from-[#12141F] via-[#12141F]/20 to-transparent opacity-90" />
@@ -66,11 +69,11 @@ export const MovieCard: React.FC<MovieCardProps> = ({
               </span>
             )}
           </div>
-          <h3 className="font-display font-bold text-base sm:text-lg text-white leading-tight line-clamp-1 group-hover:text-violet-300 transition-colors">
+          <span className="block font-display font-bold text-base sm:text-lg text-white leading-tight line-clamp-1 group-hover:text-violet-300 transition-colors">
             {movie.title}
-          </h3>
+          </span>
         </div>
-      </div>
+      </button>
 
       {/* Card Body */}
       <div className="p-4 flex-1 flex flex-col justify-between gap-3">
@@ -87,12 +90,12 @@ export const MovieCard: React.FC<MovieCardProps> = ({
             ))}
           </div>
 
-          <p
-            onClick={() => onSelectMovie(movie)}
-            className="text-xs text-slate-400 line-clamp-2 cursor-pointer hover:text-slate-300"
-          >
-            {movie.overview}
-          </p>
+          {movie.recommendationReason && (
+            <p className="text-[11px] font-semibold text-fuchsia-300 mb-1.5 line-clamp-1">
+              {movie.recommendationReason}
+            </p>
+          )}
+          <p className="text-xs text-slate-400 line-clamp-2">{movie.overview}</p>
         </div>
 
         {/* Streaming Availability Section */}
@@ -110,7 +113,8 @@ export const MovieCard: React.FC<MovieCardProps> = ({
                       src={p.logoUrl}
                       alt={p.providerName}
                       title={`Incluído em: ${p.providerName}`}
-                      className="w-6 h-6 rounded-full ring-2 ring-[#12141F] object-cover"
+                      loading="lazy"
+                      className="w-6 h-6 rounded-full ring-2 ring-[#12141F] object-cover bg-slate-800"
                     />
                   ))}
                 </div>
@@ -137,13 +141,15 @@ export const MovieCard: React.FC<MovieCardProps> = ({
             <button
               type="button"
               onClick={() => onQuickSave(movie, WatchlistType.WantToWatch)}
+              aria-pressed={isWantToWatch}
+              aria-label={`${isWantToWatch ? 'Na lista Quero Ver' : 'Adicionar à lista Quero Ver'}: ${movie.title}`}
               className={`flex items-center justify-center gap-1.5 py-1.5 px-2.5 rounded-lg text-xs font-medium transition-all ${
                 isWantToWatch
                   ? 'bg-violet-600 text-white shadow-md shadow-violet-900/40'
                   : 'bg-slate-800/80 hover:bg-slate-700 text-slate-200 border border-slate-700/70'
               }`}
             >
-              <Bookmark className={`w-3.5 h-3.5 ${isWantToWatch ? 'fill-white' : ''}`} />
+              <Bookmark className={`w-3.5 h-3.5 ${isWantToWatch ? 'fill-white' : ''}`} aria-hidden="true" />
               {isWantToWatch ? 'Na Lista' : 'Quero Ver'}
             </button>
 
@@ -152,6 +158,7 @@ export const MovieCard: React.FC<MovieCardProps> = ({
               onClick={() =>
                 isWatched ? onSelectMovie(movie) : onQuickSave(movie, WatchlistType.Watched)
               }
+              aria-label={`${isWatched ? 'Já visto, editar avaliação' : 'Marcar como Já Vi'}: ${movie.title}`}
               className={`flex items-center justify-center gap-1.5 py-1.5 px-2.5 rounded-lg text-xs font-medium transition-all ${
                 isWatched
                   ? 'bg-emerald-600 text-white shadow-md shadow-emerald-900/40'
@@ -173,6 +180,6 @@ export const MovieCard: React.FC<MovieCardProps> = ({
           </div>
         </div>
       </div>
-    </div>
+    </article>
   );
-};
+});

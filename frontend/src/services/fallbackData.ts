@@ -4,11 +4,14 @@ import {
   DiscoverResultDto,
   GenreDto,
   MovieCardDto,
+  SurpriseResponseDto,
+  UserProfileDto,
   VibeDefinition,
   WatchlistItem,
   WatchlistStatsDto,
   WatchlistType
 } from '../types/api';
+import { providerMatches } from '../lib/constants';
 
 export const FALLBACK_VIBES: VibeDefinition[] = [
   {
@@ -473,79 +476,83 @@ export const FALLBACK_MOVIES: MovieCardDto[] = [
   }
 ];
 
-export function buildFallbackDiscover(params: {
+// Extra offline metadata (trailers / taglines) for the curated catalog.
+const MOVIE_EXTRAS: Record<number, Pick<MovieCardDto, 'trailerYoutubeKey' | 'tagline'>> = {
+  27205: { trailerYoutubeKey: 'YoHD9XEInc0', tagline: 'Sua mente é a cena do crime.' },
+  1124: { trailerYoutubeKey: null, tagline: 'Você está olhando com atenção?' },
+  329865: { trailerYoutubeKey: 'tFMo3UJ4B4g', tagline: 'Por que eles estão aqui?' },
+  37165: { trailerYoutubeKey: null, tagline: 'Ao vivo e sem saber de nada.' },
+  194: { trailerYoutubeKey: null, tagline: 'Ela vai mudar a sua vida.' },
+  244786: { trailerYoutubeKey: '7d_jQycdQGo', tagline: 'O caminho para a grandeza não é para os fracos.' },
+  335984: { trailerYoutubeKey: 'gCcx85zbxz4', tagline: 'A chave para o futuro está finalmente desenterrada.' },
+  64690: { trailerYoutubeKey: 'KBiOF3y1W0Y', tagline: 'Há heróis que nunca são esquecidos.' },
+  965150: { trailerYoutubeKey: null, tagline: 'Algumas memórias só fazem sentido depois.' },
+  38: { trailerYoutubeKey: null, tagline: 'Você pode apagar alguém da sua mente. Tirá-lo do coração é outra história.' },
+  9495: { trailerYoutubeKey: null, tagline: 'Vinte minutos para mudar tudo.' },
+  447332: { trailerYoutubeKey: 'WR7cc5t7tv8', tagline: 'Se eles ouvirem você, eles caçam você.' }
+};
+
+for (const movie of FALLBACK_MOVIES) {
+  Object.assign(movie, MOVIE_EXTRAS[movie.tmdbId] ?? {});
+}
+
+export const FALLBACK_PAGE_SIZE = 8;
+
+export interface FallbackDiscoverParams {
   vibes?: string[];
   genres?: number[];
   maxRuntime?: number | null;
   decade?: number | null;
   minRating?: number | null;
   search?: string;
-  provider?: string | null;
-}): DiscoverResultDto {
+  providers?: string[];
+  onlyMyProviders?: boolean;
+  myProviders?: string[];
+  sortBy?: string;
+  page?: number;
+  excludeIds?: number[];
+}
+
+function matchesAnyProvider(movie: MovieCardDto, wanted: string[]): boolean {
+  return movie.watchProviders.flatrate.some((fp) =>
+    wanted.some((w) => providerMatches(fp.providerName, w))
+  );
+}
+
+/** Filters the curated catalog (no pagination). Used by discover, surprise and recommendations. */
+export function filterFallbackMovies(params: FallbackDiscoverParams): {
+  movies: MovieCardDto[];
+  effectiveMaxRt: number | null;
+  matchedDefs: VibeDefinition[];
+} {
   const selectedVibes = (params.vibes || []).filter(Boolean);
   const selectedGenres = params.genres || [];
-
-  const tmdbParams: Record<string, string> = {
-    language: 'pt-BR',
-    watch_region: 'BR',
-    include_adult: 'false',
-    sort_by: 'popularity.desc'
-  };
-
   const matchedDefs = FALLBACK_VIBES.filter((v) => selectedVibes.includes(v.id));
-  if (matchedDefs.length > 0) {
-    const kwIds = Array.from(new Set(matchedDefs.flatMap((v) => v.tmdbKeywordIds)));
-    if (kwIds.length > 0) tmdbParams['with_keywords'] = kwIds.join('|');
-    const maxRt = matchedDefs
-      .map((v) => v.maxRuntimeMinutes)
-      .filter((x): x is number => typeof x === 'number');
-    if (maxRt.length > 0 && !params.maxRuntime) {
-      tmdbParams['with_runtime.lte'] = String(Math.min(...maxRt));
-    }
-  }
-
-  const allGenres = Array.from(
-    new Set([...selectedGenres, ...matchedDefs.flatMap((v) => v.suggestedGenreIds)])
-  );
-  if (allGenres.length > 0) {
-    tmdbParams['with_genres'] = allGenres.join(',');
-  }
-  if (params.maxRuntime) {
-    tmdbParams['with_runtime.lte'] = String(params.maxRuntime);
-  }
-  if (params.minRating) {
-    tmdbParams['vote_average.gte'] = params.minRating.toFixed(1);
-  }
-  if (params.provider) {
-    tmdbParams['with_watch_providers'] = params.provider;
-  }
 
   let filtered = [...FALLBACK_MOVIES];
   if (selectedVibes.length > 0) {
-    filtered = filtered.filter((m) =>
-      m.matchedVibes.some((mv) => selectedVibes.includes(mv))
-    );
+    filtered = filtered.filter((m) => m.matchedVibes.some((mv) => selectedVibes.includes(mv)));
   }
   if (selectedGenres.length > 0) {
-    filtered = filtered.filter((m) =>
-      m.genreIds.some((gid) => selectedGenres.includes(gid))
-    );
+    filtered = filtered.filter((m) => m.genreIds.some((gid) => selectedGenres.includes(gid)));
   }
-  const effectiveMaxRt =
-    params.maxRuntime ||
-    (matchedDefs.some((v) => v.maxRuntimeMinutes)
-      ? Math.min(
-          ...matchedDefs
-            .map((v) => v.maxRuntimeMinutes)
-            .filter((x): x is number => typeof x === 'number')
-        )
-      : null);
+  const vibeRuntimes = matchedDefs
+    .map((v) => v.maxRuntimeMinutes)
+    .filter((x): x is number => typeof x === 'number');
+  const effectiveMaxRt = params.maxRuntime || (vibeRuntimes.length ? Math.min(...vibeRuntimes) : null);
 
   if (effectiveMaxRt) {
     filtered = filtered.filter((m) => (m.runtimeMinutes || 999) <= effectiveMaxRt);
   }
   if (params.minRating) {
-    filtered = filtered.filter((m) => m.voteAverage >= params.minRating!);
+    const min = params.minRating;
+    filtered = filtered.filter((m) => m.voteAverage >= min);
+  }
+  if (params.decade) {
+    const start = params.decade;
+    filtered = filtered.filter(
+      (m) => typeof m.releaseYear === 'number' && m.releaseYear >= start && m.releaseYear < start + 10
+    );
   }
   if (params.search?.trim()) {
     const q = params.search.trim().toLowerCase();
@@ -558,38 +565,94 @@ export function buildFallbackDiscover(params: {
         (m.director && m.director.toLowerCase().includes(q))
     );
   }
-  if (params.provider) {
-    const p = params.provider.toLowerCase();
-    filtered = filtered.filter((m) =>
-      m.watchProviders.flatrate.some((fp) => fp.providerName.toLowerCase().includes(p))
-    );
+  if (params.providers && params.providers.length > 0) {
+    const wanted = params.providers;
+    filtered = filtered.filter((m) => matchesAnyProvider(m, wanted));
+  }
+  if (params.onlyMyProviders && params.myProviders && params.myProviders.length > 0) {
+    const mine = params.myProviders;
+    filtered = filtered.filter((m) => matchesAnyProvider(m, mine));
+  }
+  if (params.excludeIds && params.excludeIds.length > 0) {
+    const ex = new Set(params.excludeIds);
+    filtered = filtered.filter((m) => !ex.has(m.tmdbId));
+  }
+
+  switch (params.sortBy) {
+    case 'vote_average.desc':
+      filtered.sort((a, b) => b.voteAverage - a.voteAverage);
+      break;
+    case 'primary_release_date.desc':
+      filtered.sort((a, b) => (b.releaseYear || 0) - (a.releaseYear || 0));
+      break;
+    case 'primary_release_date.asc':
+      filtered.sort((a, b) => (a.releaseYear || 0) - (b.releaseYear || 0));
+      break;
+    default:
+      break;
+  }
+
+  return { movies: filtered, effectiveMaxRt, matchedDefs };
+}
+
+export function buildFallbackDiscover(params: FallbackDiscoverParams): DiscoverResultDto {
+  const selectedGenres = params.genres || [];
+  const { movies, effectiveMaxRt, matchedDefs } = filterFallbackMovies(params);
+
+  const tmdbParams: Record<string, string> = {
+    language: 'pt-BR',
+    watch_region: 'BR',
+    include_adult: 'false',
+    sort_by: params.sortBy || 'popularity.desc'
+  };
+  if (matchedDefs.length > 0) {
+    const kwIds = Array.from(new Set(matchedDefs.flatMap((v) => v.tmdbKeywordIds)));
+    if (kwIds.length > 0) tmdbParams['with_keywords'] = kwIds.join('|');
+  }
+  const allGenres = Array.from(
+    new Set([...selectedGenres, ...matchedDefs.flatMap((v) => v.suggestedGenreIds)])
+  );
+  if (allGenres.length > 0) tmdbParams['with_genres'] = allGenres.join(',');
+  if (effectiveMaxRt) tmdbParams['with_runtime.lte'] = String(effectiveMaxRt);
+  if (params.minRating) tmdbParams['vote_average.gte'] = params.minRating.toFixed(1);
+  if (params.decade) {
+    tmdbParams['primary_release_date.gte'] = `${params.decade}-01-01`;
+    tmdbParams['primary_release_date.lte'] = `${params.decade + 9}-12-31`;
+  }
+  const providerNames = [
+    ...(params.providers || []),
+    ...(params.onlyMyProviders ? params.myProviders || [] : [])
+  ];
+  if (providerNames.length > 0) {
+    tmdbParams['with_watch_providers'] = Array.from(new Set(providerNames)).join('|');
   }
 
   const formulaParts: string[] = [];
-  if (matchedDefs.length > 0) {
-    formulaParts.push(`Vibes [${matchedDefs.map((v) => v.name).join(' + ')}]`);
+  if (matchedDefs.length > 0) formulaParts.push(`Vibes [${matchedDefs.map((v) => v.name).join(' + ')}]`);
+  if (selectedGenres.length > 0) formulaParts.push(`Gêneros TMDB (${selectedGenres.join(', ')})`);
+  if (effectiveMaxRt) formulaParts.push(`Duração <= ${effectiveMaxRt} min`);
+  if (params.decade) formulaParts.push(`Década de ${params.decade}`);
+  if (params.minRating) formulaParts.push(`Nota >= ${params.minRating}`);
+  if (params.providers && params.providers.length > 0) {
+    formulaParts.push(`Streaming BR: ${params.providers.join(', ')}`);
   }
-  if (selectedGenres.length > 0) {
-    formulaParts.push(`Gêneros TMDB (${selectedGenres.join(', ')})`);
-  }
-  if (effectiveMaxRt) {
-    formulaParts.push(`Duração <= ${effectiveMaxRt} min`);
-  }
-  if (params.provider) {
-    formulaParts.push(`Streaming BR: ${params.provider}`);
-  }
+  if (params.onlyMyProviders) formulaParts.push('Só nos meus streamings');
+
+  const page = Math.max(1, params.page || 1);
+  const totalPages = Math.max(1, Math.ceil(movies.length / FALLBACK_PAGE_SIZE));
+  const pageItems = movies.slice((page - 1) * FALLBACK_PAGE_SIZE, page * FALLBACK_PAGE_SIZE);
 
   return {
-    page: 1,
-    totalResults: filtered.length,
-    totalPages: 1,
+    page,
+    totalResults: movies.length,
+    totalPages,
     usingLiveTmdbApi: false,
     appliedFormulaSummary:
       formulaParts.length > 0
         ? formulaParts.join(' • ')
         : 'Catálogo Curado Geral (Região BR + JustWatch Providers)',
     appliedTmdbQueryParameters: tmdbParams,
-    movies: filtered
+    movies: pageItems
   };
 }
 
@@ -602,7 +665,9 @@ export function buildFallbackCinemaRadar(cityInput: string): CinemaRadarResponse
     city,
     state,
     scrapedAt: new Date().toISOString(),
-    scraperSource: `HtmlAgilityPack DOM Parser • Programação Local (${city}/${state}) + TMDB Now Playing`,
+    scraperSource: `Modo offline • Programação ilustrativa (${city}/${state}) + catálogo local`,
+    isSimulatedSchedule: true,
+    notice: 'Horários ilustrativos — confira no site do cinema antes de sair de casa.',
     moviesInTheaters: [
       {
         movie: {
@@ -641,7 +706,8 @@ export function buildFallbackCinemaRadar(cityInput: string): CinemaRadarResponse
             sessions: [
               { time: '16:30', roomType: 'VIP / 2D', audioType: 'Legendado', ticketUrl: 'https://www.ingresso.com' },
               { time: '19:20', roomType: 'IMAX 2D', audioType: 'Legendado', ticketUrl: 'https://www.ingresso.com' },
-              { time: '21:50', roomType: 'IMAX 2D', audioType: 'Legendado', ticketUrl: 'https://www.ingresso.com' }
+              { time: '21:50', roomType: 'IMAX 2D', audioType: 'Legendado', ticketUrl: 'https://www.ingresso.com' },
+              { time: '23:20', roomType: 'IMAX 2D', audioType: 'Dublado', ticketUrl: 'https://www.ingresso.com' }
             ]
           },
           {
@@ -691,6 +757,7 @@ export function buildFallbackCinemaRadar(cityInput: string): CinemaRadarResponse
             cinemaName: `GNC ${city} Garten Shopping`,
             address: `Av. Rolf Wiest, 333 - ${city}/${state}`,
             sessions: [
+              { time: '13:40', roomType: 'Sala 2 • 2D', audioType: 'Dublado', ticketUrl: 'https://www.ingresso.com' },
               { time: '17:00', roomType: 'Sala 2 • 2D', audioType: 'Dublado', ticketUrl: 'https://www.ingresso.com' },
               { time: '20:15', roomType: 'VIP / 2D', audioType: 'Legendado', ticketUrl: 'https://www.ingresso.com' }
             ]
@@ -701,7 +768,8 @@ export function buildFallbackCinemaRadar(cityInput: string): CinemaRadarResponse
             address: `Rua Visconde de Taunay, 235 - Centro, ${city}/${state}`,
             sessions: [
               { time: '19:00', roomType: 'Sala 3 • 2D', audioType: 'Legendado', ticketUrl: 'https://www.ingresso.com' },
-              { time: '21:45', roomType: 'Sala 3 • 2D', audioType: 'Legendado', ticketUrl: 'https://www.ingresso.com' }
+              { time: '21:45', roomType: 'Sala 3 • 2D', audioType: 'Legendado', ticketUrl: 'https://www.ingresso.com' },
+              { time: '23:05', roomType: 'Sala 3 • 3D', audioType: 'Dublado', ticketUrl: 'https://www.ingresso.com' }
             ]
           }
         ]
@@ -754,27 +822,285 @@ export const INITIAL_FALLBACK_WATCHLIST: WatchlistItem[] = [
     genresCsv: 'Ficção Científica, Drama',
     runtimeMinutes: 164,
     tmdbVoteAverage: 7.6
-  }
+  },
+  ...(
+    [
+      [329865, 5, 40, 'A cena final reorganiza o filme inteiro na cabeça.'],
+      [244786, 4, 75, 'Saí sem fôlego. J.K. Simmons assustador.'],
+      [38, 5, 130, undefined],
+      [37165, 4, 200, 'Clássico que envelheceu muito bem.'],
+      [447332, 3, 260, undefined]
+    ] as [number, number, number, string | undefined][]
+  ).map(([id, rating, daysAgo, notes], idx): WatchlistItem => {
+    const m = FALLBACK_MOVIES.find((x) => x.tmdbId === id)!;
+    return {
+      id: `watch-seed-${idx + 3}`,
+      userId: 'demo-user-01',
+      tmdbMovieId: m.tmdbId,
+      title: m.title,
+      originalTitle: m.originalTitle,
+      posterPath: m.posterUrl,
+      backdropPath: m.backdropUrl,
+      releaseYear: m.releaseYear,
+      overview: m.overview,
+      listType: WatchlistType.Watched,
+      personalRating: rating,
+      personalNotes: notes,
+      watchedAt: new Date(Date.now() - daysAgo * 86400000).toISOString(),
+      addedAt: new Date(Date.now() - (daysAgo + 5) * 86400000).toISOString(),
+      genresCsv: m.genres.join(', '),
+      runtimeMinutes: m.runtimeMinutes,
+      tmdbVoteAverage: m.voteAverage
+    };
+  })
 ];
 
+const MONTH_LABELS = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+
+function monthLabel(date: Date): string {
+  return `${MONTH_LABELS[date.getMonth()]}/${String(date.getFullYear()).slice(-2)}`;
+}
+
+function splitGenres(csv: string): string[] {
+  return (csv || '')
+    .split(',')
+    .map((g) => g.trim())
+    .filter(Boolean);
+}
+
+/** Stats computed locally (offline mode, or to fill fields an older backend does not send). */
 export function computeWatchlistStats(items: WatchlistItem[]): WatchlistStatsDto {
   const watched = items.filter((i) => i.listType === WatchlistType.Watched);
   const wantToWatch = items.filter((i) => i.listType === WatchlistType.WantToWatch);
-  const rated = watched.filter((i) => typeof i.personalRating === 'number');
+  const rated = watched.filter((i) => typeof i.personalRating === 'number' && i.personalRating > 0);
   const avg =
     rated.length > 0
-      ? Number(
-          (
-            rated.reduce((acc, cur) => acc + (cur.personalRating || 0), 0) / rated.length
-          ).toFixed(1)
-        )
-      : 4.8;
+      ? Number((rated.reduce((acc, cur) => acc + (cur.personalRating || 0), 0) / rated.length).toFixed(1))
+      : 0;
+
+  const genreCounts = new Map<string, number>();
+  for (const item of watched) {
+    for (const g of splitGenres(item.genresCsv)) {
+      genreCounts.set(g, (genreCounts.get(g) || 0) + 1);
+    }
+  }
+  const genreBreakdown = [...genreCounts.entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+  const ratingDistribution: Record<string, number> = { '1': 0, '2': 0, '3': 0, '4': 0, '5': 0 };
+  for (const item of rated) {
+    const key = String(Math.min(5, Math.max(1, Math.round(item.personalRating || 0))));
+    ratingDistribution[key] += 1;
+  }
+
+  const now = new Date();
+  const watchedPerMonth: { name: string; count: number }[] = [];
+  for (let offset = 11; offset >= 0; offset--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - offset, 1);
+    const count = watched.filter((w) => {
+      if (!w.watchedAt) return false;
+      const wd = new Date(w.watchedAt);
+      return wd.getFullYear() === d.getFullYear() && wd.getMonth() === d.getMonth();
+    }).length;
+    watchedPerMonth.push({ name: monthLabel(d), count });
+  }
+
+  const totalMinutesWatched = watched.reduce((acc, cur) => acc + (cur.runtimeMinutes || 110), 0);
 
   return {
     totalWantToWatch: wantToWatch.length,
     totalWatched: watched.length,
-    totalMinutesWatched: watched.reduce((acc, cur) => acc + (cur.runtimeMinutes || 110), 0),
+    totalMinutesWatched,
     averagePersonalRating: avg,
-    favoriteGenre: 'Ficção Científica'
+    favoriteGenre: genreBreakdown[0]?.name || '—',
+    genreBreakdown,
+    ratingDistribution,
+    watchedPerMonth,
+    totalHoursWatched: Number((totalMinutesWatched / 60).toFixed(1))
   };
+}
+
+/** Fills any stats field missing from the backend response with locally computed values. */
+export function completeWatchlistStats(
+  stats: WatchlistStatsDto | null,
+  items: WatchlistItem[]
+): WatchlistStatsDto {
+  const local = computeWatchlistStats(items);
+  if (!stats) return local;
+  return {
+    ...local,
+    ...stats,
+    genreBreakdown: stats.genreBreakdown ?? local.genreBreakdown,
+    ratingDistribution: stats.ratingDistribution ?? local.ratingDistribution,
+    watchedPerMonth: stats.watchedPerMonth ?? local.watchedPerMonth,
+    totalHoursWatched:
+      stats.totalHoursWatched ?? Number(((stats.totalMinutesWatched || 0) / 60).toFixed(1))
+  };
+}
+
+const ALL_FALLBACK_MOVIES = (): MovieCardDto[] => {
+  const cinema = buildFallbackCinemaRadar('Joinville/SC').moviesInTheaters.map((e) => e.movie);
+  const seen = new Set<number>();
+  return [...FALLBACK_MOVIES, ...cinema].filter((m) => {
+    if (seen.has(m.tmdbId)) return false;
+    seen.add(m.tmdbId);
+    return true;
+  });
+};
+
+export function findFallbackMovie(id: number): MovieCardDto | null {
+  return ALL_FALLBACK_MOVIES().find((m) => m.tmdbId === id) ?? null;
+}
+
+function similarityScore(a: MovieCardDto, b: MovieCardDto): number {
+  const sharedGenres = a.genreIds.filter((g) => b.genreIds.includes(g)).length;
+  const sharedVibes = a.matchedVibes.filter((v) => b.matchedVibes.includes(v)).length;
+  const sameDirector = a.director && a.director === b.director ? 2 : 0;
+  return sharedGenres * 2 + sharedVibes * 3 + sameDirector + b.voteAverage / 10;
+}
+
+export function buildFallbackSimilar(id: number): MovieCardDto[] {
+  const all = ALL_FALLBACK_MOVIES();
+  const base = all.find((m) => m.tmdbId === id);
+  const others = all.filter((m) => m.tmdbId !== id);
+  if (!base) return others.slice(0, 8);
+  return others
+    .map((m) => ({ m, score: similarityScore(base, m) }))
+    .filter((x) => x.score > 1)
+    .sort((x, y) => y.score - x.score)
+    .slice(0, 10)
+    .map((x) => x.m);
+}
+
+export function buildFallbackSurprise(
+  params: FallbackDiscoverParams,
+  excludeIds: number[]
+): SurpriseResponseDto {
+  let pool = filterFallbackMovies({ ...params, page: 1, excludeIds }).movies;
+  let relaxed = false;
+  if (pool.length === 0) {
+    // Relax the filters but still honour the vibes when possible.
+    pool = filterFallbackMovies({ vibes: params.vibes, excludeIds }).movies;
+    relaxed = true;
+  }
+  if (pool.length === 0) {
+    pool = FALLBACK_MOVIES.filter((m) => !excludeIds.includes(m.tmdbId));
+    relaxed = true;
+  }
+  if (pool.length === 0) pool = [...FALLBACK_MOVIES];
+
+  const movie = pool[Math.floor(Math.random() * pool.length)];
+  const vibeNames = FALLBACK_VIBES.filter(
+    (v) => (params.vibes || []).includes(v.id) && movie.matchedVibes.includes(v.id)
+  ).map((v) => v.name);
+
+  const reasonParts: string[] = [];
+  if (vibeNames.length > 0) reasonParts.push(`Combina com a vibe "${vibeNames.join('" + "')}"`);
+  else reasonParts.push(`Um achado de ${movie.genres.slice(0, 2).join(' e ').toLowerCase()}`);
+  reasonParts.push(`nota ${movie.voteAverage.toFixed(1)} no TMDB`);
+  if (movie.runtimeMinutes) reasonParts.push(`${movie.runtimeMinutes} min`);
+  const flat = movie.watchProviders.flatrate[0];
+  if (flat) reasonParts.push(`disponível na ${flat.providerName}`);
+  const reason = reasonParts.join(' • ') + (relaxed ? ' (filtros relaxados para achar algo novo)' : '');
+
+  return {
+    movie,
+    reason,
+    spokenText: `Que tal assistir ${movie.title}${movie.director ? `, de ${movie.director}` : ''}? ${
+      vibeNames.length ? `Tem tudo a ver com a vibe ${vibeNames[0]}.` : ''
+    }`.trim()
+  };
+}
+
+export function buildFallbackRecommendations(watchlist: WatchlistItem[]): MovieCardDto[] {
+  const listed = new Set(watchlist.map((w) => w.tmdbMovieId));
+  const liked = watchlist
+    .filter((w) => w.listType === WatchlistType.Watched && (w.personalRating ?? 0) >= 4)
+    .map((w) => ({ item: w, movie: findFallbackMovie(w.tmdbMovieId) }))
+    .filter((x): x is { item: WatchlistItem; movie: MovieCardDto } => x.movie !== null);
+  const wanted = watchlist
+    .filter((w) => w.listType === WatchlistType.WantToWatch)
+    .map((w) => ({ item: w, movie: findFallbackMovie(w.tmdbMovieId) }))
+    .filter((x): x is { item: WatchlistItem; movie: MovieCardDto } => x.movie !== null);
+  const seeds = [...liked, ...wanted];
+  if (seeds.length === 0) return [];
+
+  const results: MovieCardDto[] = [];
+  for (const candidate of FALLBACK_MOVIES) {
+    if (listed.has(candidate.tmdbId)) continue;
+    let best: { score: number; seed: { item: WatchlistItem; movie: MovieCardDto } } | null = null;
+    for (const seed of seeds) {
+      const score = similarityScore(seed.movie, candidate);
+      if (!best || score > best.score) best = { score, seed };
+    }
+    if (best && best.score > 3) {
+      const isLiked = best.seed.item.listType === WatchlistType.Watched;
+      results.push({
+        ...candidate,
+        recommendationReason: isLiked
+          ? `Porque você curtiu ${best.seed.item.title}`
+          : `Parecido com ${best.seed.item.title}, que está na sua lista`
+      });
+    }
+  }
+  return results.sort((a, b) => b.vibeMatchScore - a.vibeMatchScore).slice(0, 10);
+}
+
+/** Offline profile, persisted in localStorage by the api layer. */
+export function buildFallbackProfile(
+  auth: AuthResponseDto | null,
+  stored: Partial<UserProfileDto> | null
+): UserProfileDto {
+  return {
+    userId: auth?.userId ?? FALLBACK_DEMO_AUTH.userId,
+    email: auth?.email ?? FALLBACK_DEMO_AUTH.email,
+    name: stored?.name ?? auth?.name ?? FALLBACK_DEMO_AUTH.name,
+    preferredRegion: stored?.preferredRegion ?? auth?.preferredRegion ?? 'BR',
+    defaultCity: stored?.defaultCity ?? auth?.defaultCity ?? 'Joinville/SC',
+    myProviders: stored?.myProviders ?? auth?.myProviders ?? []
+  };
+}
+
+function csvCell(value: unknown): string {
+  const text = value === undefined || value === null ? '' : String(value);
+  return /[";\n\r,]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+/** Client-side CSV export of the diary (offline fallback of /watchlist/export). */
+export function buildWatchlistCsv(items: WatchlistItem[]): string {
+  const header = [
+    'titulo',
+    'titulo_original',
+    'ano',
+    'lista',
+    'nota_pessoal',
+    'anotacoes',
+    'assistido_em',
+    'adicionado_em',
+    'generos',
+    'duracao_min',
+    'nota_tmdb',
+    'tmdb_id'
+  ];
+  const rows = items.map((i) =>
+    [
+      i.title,
+      i.originalTitle,
+      i.releaseYear ?? '',
+      i.listType === WatchlistType.Watched ? 'Já Vi' : 'Quero Ver',
+      i.personalRating ?? '',
+      i.personalNotes ?? '',
+      i.watchedAt ? i.watchedAt.slice(0, 10) : '',
+      i.addedAt ? i.addedAt.slice(0, 10) : '',
+      i.genresCsv,
+      i.runtimeMinutes ?? '',
+      i.tmdbVoteAverage,
+      i.tmdbMovieId
+    ]
+      .map(csvCell)
+      .join(',')
+  );
+  // BOM so Excel opens accents correctly.
+  return '﻿' + [header.join(','), ...rows].join('\r\n');
 }
